@@ -10,7 +10,7 @@ After=network.target nvidia-persistenced.service
 WorkingDirectory=/home/spravce/llama/llama.cpp/build-cuda
 
 # Main command to start the llama-server with various parameters
-ExecStart=/home/spravce/podman/llama.cpp/build-cuda/bin/llama-server \
+ExecStart=/home/spravce/llama.cpp/build-cuda/bin/llama-server \
 -hf unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF:Q8_K_XL \
 --threads 3 \
 -np 1 \
