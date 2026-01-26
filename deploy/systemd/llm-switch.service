@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Proxy Server for Dynamic Model Switching
+After=network.target
+
+[Service]
+Type=simple
+
+ExecStart=/home/spravce/llama/systemd-llm-switch/.venv/bin/python /home/spravce/llama/systemd-llm-switch/src/systemd_llm_switch/main.py
+
+WorkingDirectory=/home/spravce/llama/systemd-llm-switch/src/systemd_llm_switch/
+
+Restart=always
+RestartSec=5
+
+Environment="PATH=/home/spravce/llama/systemd-llm-switch/.venv/bin"
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,28 @@
+[Unit]
+Description=Llama-CPP Server (BGE-M3)
+After=network.target
+
+[Service]
+# Path to the main directory where the llama-server executable file is located
+WorkingDirectory=/home/spravce/podman/llama/llama.cpp/build-cuda
+
+# The trigger command itself
+ExecStart=/home/spravce/podman/llama/llama.cpp/build-cuda/bin/llama-server \
+-hf ggml-org/bge-m3-Q8_0-GGUF:Q8_0 \
+-np 1 \
+--threads 3 \
+--batch-size 2048 \
+--ubatch-size 2048 \
+--ctx-size 8192 \
+-a bge-m3 \
+--flash-attn on \
+--n-gpu-layers 99 \
+--host 0.0.0.0 \
+--port 3004 \
+--embedding
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
