@@ -8,7 +8,7 @@ import yaml
 import sys
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional
 
 # --------------------
 # - Logging settings -
@@ -27,35 +27,37 @@ logging.basicConfig(
 # - Configuration -
 # -----------------------------------------------------------------------------
 CONFIG = {}
+MODELS = {}
+LLAMA_URL = ""
 
 
 def load_config(path: str = 'config.yaml'):
-    """Loads the configuration from the YAML file."""
-    global CONFIG
+    """Loads the configuration and explicitly updates global variables."""
+    global CONFIG, MODELS, LLAMA_URL
     try:
         config_path = Path(__file__).parent / path
         with open(config_path, 'r') as f:
-            CONFIG = yaml.safe_load(f)
-        logging.info(f"Configuration successfully loaded from '{config_path}'")
-        # Verify that the key sections are in the configuration
-        if 'server' not in CONFIG or 'models' not in CONFIG:
+            data = yaml.safe_load(f)
+
+        if not data or 'server' not in data or 'models' not in data:
             logging.critical(
-                "The configuration file is invalid. "
-                "The 'server' or 'models' section is missing."
+                "The configuration file is invalid "
+                "or the 'server'/'models' section is missing."
             )
             sys.exit(1)
-    except FileNotFoundError as e:
-        logging.critical(f"Failed to load or process config.yaml: {e}")
-        sys.exit(1)
-    except yaml.YAMLError as e:
-        logging.critical(f"Error parsing config.yaml file: {e}")
+
+        CONFIG = data
+        MODELS = data['models']
+        LLAMA_URL = data['server']['llama_url']
+
+        logging.info(f"Configuration loaded. Models: {list(MODELS.keys())}")
+
+    except Exception as e:
+        logging.critical(f"Critical error loading config.yaml: {e}")
         sys.exit(1)
 
 
-# Determines values from the loaded configuration
-# Will be filled at startup
-MODELS: Dict[str, str] = {}
-LLAMA_URL = ""
+load_config()
 # -----------------------------------------------------------------------------
 
 
@@ -65,7 +67,7 @@ def run_systemctl_user(
     service: str
 ) -> subprocess.CompletedProcess:
     """Runs the systemctl --user command safely."""
-    command = ["systemctl", "--user", action, service]
+    command = ["/usr/bin/systemctl", "--user", action, service]
     return subprocess.run(command, capture_output=True, text=True)
 
 
@@ -209,16 +211,11 @@ class ListModels:
 
 
 if __name__ == "__main__":
-    # 1. Load the configuration right at the start
-    load_config()
-
-    # 2. Setting global variables from the configuration
-    MODELS = CONFIG['models']
-    LLAMA_URL = CONFIG['server']['llama_url']
+    # 1. Setting global variables from the configuration
     server_port = CONFIG['server']['port']
     server_host = CONFIG['server']['host']
 
-    # 3. Adjusting server startup
+    # 2. Adjusting server startup
     # Add the host and port from the configuration to the arguments for web.py
     sys.argv.append(f'{server_host}:{server_port}')
 
