@@ -1,12 +1,14 @@
 [Unit]
 Description=Llama-CPP Server (BGE-M3)
+# Service should start after network and nvidia services are available
 After=network.target
+After=network.target nvidia-persistenced.service
 
 [Service]
-# Path to the main directory where the llama-server executable file is located
+# Working directory where the llama-server executable is located
 WorkingDirectory=/home/spravce/podman/llama/llama.cpp/build-cuda
 
-# The trigger command itself
+# Main command to start the llama-server with various parameters
 ExecStart=/home/spravce/podman/llama/llama.cpp/build-cuda/bin/llama-server \
 -hf ggml-org/bge-m3-Q8_0-GGUF:Q8_0 \
 -np 1 \
@@ -21,8 +23,11 @@ ExecStart=/home/spravce/podman/llama/llama.cpp/build-cuda/bin/llama-server \
 --port 3004 \
 --embedding
 
+# Restart the service if it crashes or stops
 Restart=always
+# Wait 5 seconds before restarting
 RestartSec=5
 
 [Install]
+# Service should be started when the system reaches multi-user target
 WantedBy=multi-user.target

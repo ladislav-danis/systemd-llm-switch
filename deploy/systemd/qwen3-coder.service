@@ -9,10 +9,6 @@ After=network.target nvidia-persistenced.service
 # Working directory where the llama-server executable is located
 WorkingDirectory=/home/spravce/podman/llama/llama.cpp/build-cuda
 
-# Pre-start commands to set NVIDIA GPU power management and power limit
-ExecStartPre=/usr/bin/nvidia-smi -pm 1
-ExecStartPre=/usr/bin/nvidia-smi -pl 60
-
 # Main command to start the llama-server with various parameters
 ExecStart=/home/spravce/podman/llama/llama.cpp/build-cuda/bin/llama-server \
 -hf unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q8_K_XL \
