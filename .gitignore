@@ -1,0 +1,4 @@
+.aider*
+.gitignore
+.venv
+__pycache__
