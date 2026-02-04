@@ -14,8 +14,8 @@ ExecStart=/home/spravce/llama/llama.cpp/build-cuda/bin/llama-server \
 --model /raid/spravce/llama/model/unsloth_Qwen3-Coder-30B-A3B-Instruct-GGUF_Qwen3-Coder-30B-A3B-Instruct-UD-Q8_K_XL.gguf \
 --threads 3 \
 -np 1 \
---batch-size 1024 \
---ubatch-size 1024 \
+--batch-size 512 \
+--ubatch-size 512 \
 --ctx-size 32768 \
 --cache-type-k q8_0 \
 --cache-type-v q8_0 \
