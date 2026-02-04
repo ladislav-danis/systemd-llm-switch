@@ -11,7 +11,7 @@ WorkingDirectory=/home/spravce/llama/llama.cpp/build-cuda
 
 # Main command to start the llama-server with various parameters
 ExecStart=/home/spravce/llama/llama.cpp/build-cuda/bin/llama-server \
--hf unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF:Q8_K_XL \
+--model /raid/spravce/llama/unsloth_Qwen3-30B-A3B-Thinking-2507-GGUF_Qwen3-30B-A3B-Thinking-2507-UD-Q8_K_XL.gguf \
 --threads 3 \
 -np 1 \
 --batch-size 512 \

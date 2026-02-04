@@ -32,6 +32,8 @@ class TestModelProxy(unittest.TestCase):
             'models': {
                 'qwen3-coder-30-a3b-8gb': 'qwen3-coder.service',
                 'qwen3-thinking-30-a3b-8gb': 'qwen3-thinking.service',
+                'qwen3-coder-80-a3b-8gb': 'qwen3-coder-max.service',
+                'qwen3-thinking-80-a3b-8gb': 'qwen3-thinking-max.service',
                 'bge-m3': 'bge-embedding.service'
             }
         }

@@ -1,5 +1,6 @@
 [Unit]
-Description=Llama-CPP Server (BGE-M3)
+# Description of the service
+Description=Llama-CPP Server (Qwen3-Thinking-30B-A3B-8GB)
 # Service should start after network and nvidia services are available
 After=network.target
 After=network.target nvidia-persistenced.service
@@ -10,18 +11,22 @@ WorkingDirectory=/home/spravce/llama/llama.cpp/build-cuda
 
 # Main command to start the llama-server with various parameters
 ExecStart=/home/spravce/llama/llama.cpp/build-cuda/bin/llama-server \
---model /raid/spravce/llama/ggml-org_bge-m3-Q8_0-GGUF_bge-m3-q8_0.gguf \
--np 1 \
+--model /raid/spravce/llama/model/unsloth_Qwen3-Next-80B-A3B-Thinking-GGUF_Qwen3-Next-80B-A3B-Thinking-UD-Q4_K_XL.gguf \
 --threads 3 \
---batch-size 2048 \
---ubatch-size 2048 \
---ctx-size 8192 \
--a bge-m3 \
+-np 1 \
+--batch-size 512 \
+--ubatch-size 512 \
+--ctx-size 32768 \
+--cache-type-k q8_0 \
+--cache-type-v q8_0 \
+--jinja \
+--temp 0.6 --min-p 0.00 --top-p 0.95 --top-k 20 --repeat-penalty 1.0 --presence_penalty 1.0 \
 --flash-attn on \
---n-gpu-layers 99 \
+-a qwen3-thinking-80-a3b-8gb \
+--n-gpu-layers 49 \
+--override-tensor ".*blk\.([3-9]|[1-3][0-9]|4[0-8])\.ffn_.*_exps.*=CPU" \
 --host 0.0.0.0 \
---port 3004 \
---embedding
+--port 3004
 
 # Restart the service if it crashes or stops
 Restart=always
