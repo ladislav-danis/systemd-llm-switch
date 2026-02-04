@@ -1,6 +1,6 @@
 [Unit]
 # Description of the service
-Description=Llama-CPP Server (Qwen3-Thinking-30B-A3B-8GB)
+Description=Llama-CPP Server (Qwen3-Thinking-80B-A3B-8GB)
 # Service should start after network and nvidia services are available
 After=network.target
 After=network.target nvidia-persistenced.service
