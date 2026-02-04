@@ -16,7 +16,7 @@ ExecStart=/home/spravce/llama/llama.cpp/build-cuda/bin/llama-server \
 -np 1 \
 --batch-size 512 \
 --ubatch-size 512 \
---ctx-size 32768 \
+--ctx-size 65536 \
 --cache-type-k q8_0 \
 --cache-type-v q8_0 \
 --jinja \
