@@ -9,8 +9,8 @@ server:
 models:
   qwen3-coder-30-a3b-8gb: "qwen3-coder.service"
   qwen3-thinking-30-a3b-8gb: "qwen3-thinking.service"
-  qwen3-coder-80-a3b-8gb: "qwen3-coder-max.service"
-  qwen3-thinking-80-a3b-8gb: "qwen3-thinking-max.service"
+  qwen3-coder-80-a3b-8gb: "qwen3-coder-next.service"
+  qwen3-thinking-80-a3b-8gb: "qwen3-thinking-next.service"
   bge-m3: "bge-embedding.service"
 
   # Example of adding another model:

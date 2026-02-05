@@ -115,8 +115,8 @@ class ChatProxy:
             logging.info(f"I am starting the service: {target_service}")
             run_systemctl_user("start", target_service)
 
-            # 4. Health check - waiting for API to start (max 60s)
-            for _ in range(60):
+            # 4. Health check - waiting for API to start (max 120s)
+            for _ in range(120):
                 try:
                     resp = requests.get(f"{LLAMA_URL}/health", timeout=1)
                     if resp.status_code == 200:
