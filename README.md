@@ -133,7 +133,7 @@ The project utilizes `systemd --user`, so it does not require root privileges fo
 | `qwen3-thinking.service` | Logic & Planning | Qwen3-Thinking-30B (Q8_K_XL) |
 | `qwen3-coder-next.service` | Coding & Syntax | Qwen3-Coder-80B (Q4_K_XL) |
 | `qwen3-thinking-next.service` | Logic & Planning | Qwen3-Thinking-80B (Q4_K_XL) |
-| `bge-embedding.service` | Vector Search (RAG) | BGE-M3 (Q8_0) |
+| `bge-m3.service` | Vector Search (RAG) | BGE-M3 (Q8_0) |
 
 **Basic Commands:**
 
