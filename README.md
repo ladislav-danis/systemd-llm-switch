@@ -54,7 +54,7 @@ flowchart TD
     
     subgraph "Systemd Layer"
         Systemctl[systemctl --user]
-        Services[Multiple LLM Services<br/>qwen3-coder.service<br/>qwen3-thinking.service<br/>bge-embedding.service]
+        Services[Multiple LLM Services<br/>qwen3-coder.service<br/>qwen3-thinking.service<br/>qwen3-coder-next.service<br/>qwen3-thinking-next.service<br/>bge-embedding.service]
     end
     
     subgraph "Backend Layer"
@@ -75,6 +75,32 @@ flowchart TD
 ---
 
 ## 🛠️ Installation & Setup
+
+**llama.cpp**
+```
+# 1. Clone repository
+https://github.com/ggml-org/llama.cpp.git
+
+#2. Code Update (Optional but Recommended)
+git pull
+git submodule update --init --recursive
+
+# 3. Cleaning up the old build
+rm -rf build-cuda
+mkdir build-cuda
+cd build-cuda
+
+# 4. Configuring CMake with CUDA flag
+cmake .. -DGGML_CUDA=ON
+
+# 5. Compilation (uses all available cores for speed)
+cmake --build . --config Release -j $(nproc)
+
+# 6. After building, you'll need to:
+#    - Download the required models using the llama-server command
+#    - Update model paths in systemd service files according to your system setup
+#      (e.g., change /home/spravce/llama/model/ to your actual model path)
+```
 
 1. **Clone the repository:**
 ```bash
@@ -105,6 +131,8 @@ The project utilizes `systemd --user`, so it does not require root privileges fo
 | `llm-switch.service` | Main Proxy Server | `main.py` |
 | `qwen3-coder.service` | Coding & Syntax | Qwen3-Coder-30B (Q8_K_XL) |
 | `qwen3-thinking.service` | Logic & Planning | Qwen3-Thinking-30B (Q8_K_XL) |
+| `qwen3-coder-next.service` | Coding & Syntax | Qwen3-Coder-80B (Q4_K_XL) |
+| `qwen3-thinking-next.service` | Logic & Planning | Qwen3-Thinking-80B (Q4_K_XL) |
 | `bge-embedding.service` | Vector Search (RAG) | BGE-M3 (Q8_0) |
 
 **Basic Commands:**
@@ -135,7 +163,7 @@ The project includes a test suite to verify correct setup:
 
 * **Provider**: OpenAI Compatible
 * **Base URL**: `http://localhost:3002/v1`
-* **Model ID**: `qwen3-coder-30-a3b-8gb` or `qwen3-thinking-30-a3b-8gb`
+* **Model ID**: `qwen3-coder-30-a3b-8gb`, `qwen3-thinking-30-a3b-8gb`, `qwen3-coder-80-a3b-8gb`, or `qwen3-thinking-80-a3b-8gb`
 * **Context Window**: 20480
 
 ### Open WebUI
@@ -144,8 +172,6 @@ Add a new OpenAI connection with the URL `http://localhost:3002/v1`.
 
 ### Models download llama.cpp command
 `llama-server -hf unsloth/Qwen3-Coder-Next-GGUF:Q4_K_XL`
-
-
 
 ## 🗺️ Repository Structure
 
@@ -161,7 +187,9 @@ systemd-llm-switch/
 │       ├── bge-embedding.service
 │       ├── llm-switch.service
 │       ├── qwen3-coder.service
-│       └── qwen3-thinking.service
+│       ├── qwen3-coder-next.service
+│       ├── qwen3-thinking.service
+│       └── qwen3-thinking-next.service
 ├── src/
 │   └── systemd_llm_switch/
 │       ├── __init__.py
