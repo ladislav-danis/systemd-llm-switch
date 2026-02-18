@@ -35,6 +35,43 @@ The system consists of three layers:
 2. **Python Proxy (Port 3002)**: The "brain" that receives API requests, controls systemd, and forwards queries.
 3. **Backend (Port 3004)**: The currently active model instance.
 
+```mermaid
+flowchart TD
+    subgraph "Client Layer"
+        Client[OpenAI-compatible Client]
+    end
+    
+    subgraph "Proxy Layer"
+        WebPy[web.py Server<br/>Port 3002]
+        ChatProxy[ChatProxy Handler]
+        ListModels[ListModels Handler]
+    end
+    
+    subgraph "LLM Management Layer"
+        Lock[Threading Lock]
+        Switcher[switch_model Logic]
+    end
+    
+    subgraph "Systemd Layer"
+        Systemctl[systemctl --user]
+        Services[Multiple LLM Services<br/>qwen3-coder.service<br/>qwen3-thinking.service<br/>bge-embedding.service]
+    end
+    
+    subgraph "Backend Layer"
+        Llama[llama.cpp API<br/>Port 3004]
+    end
+    
+    Client --> WebPy
+    WebPy --> ChatProxy
+    WebPy --> ListModels
+    ChatProxy --> Lock
+    Lock --> Switcher
+    Switcher --> Systemctl
+    Systemctl --> Services
+    Switcher -->|health check| Llama
+    ChatProxy -->|forward requests| Llama
+```
+
 ---
 
 ## 🛠️ Installation & Setup
@@ -104,6 +141,10 @@ The project includes a test suite to verify correct setup:
 ### Open WebUI
 
 Add a new OpenAI connection with the URL `http://localhost:3002/v1`.
+
+### Models download llama.cpp command
+`llama-server -hf unsloth/Qwen3-Coder-Next-GGUF:Q4_K_XL`
+
 
 
 ## 🗺️ Repository Structure
