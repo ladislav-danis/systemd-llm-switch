@@ -123,7 +123,7 @@ llama-server -hf ggml-org/bge-m3-Q8_0-GGUF:Q8_0
 The default configuration is highly optimized for **8GB VRAM** systems using a split-layer MoE (Mixture of Experts) approach.
 
 *   **Default Behavior**: It uses `--n-gpu-layers 49` and a specific `--override-tensor` regex to force heavy MoE calculations to the CPU, keeping the model within 8GB VRAM.
-*   **High-End Systems**: If you have more RAM/VRAM (e.g., 12GB, 16GB, or 24GB), you should:
+*   **High-End Systems**: If you have more VRAM (e.g., 12GB, 16GB, or 24GB), you should:
     1.  **Adjust the regex**: Modify the `override-tensor` pattern in the `.service` files to allow more experts to stay on the GPU (reducing CPU offloading).
     2.  **Monitor with `nvtop`**: Use `nvtop` to watch VRAM usage in real-time while adjusting parameters to find the perfect balance between speed and memory limits.
 
@@ -197,7 +197,7 @@ The project includes a test suite to verify correct setup:
 * **Provider**: OpenAI Compatible
 * **Base URL**: `http://localhost:3002/v1`
 * **Model ID**: `qwen3-coder-30-a3b-8gb`, `qwen3-thinking-30-a3b-8gb`, `qwen3-coder-80-a3b-8gb`, or `qwen3-thinking-80-a3b-8gb`
-* **Context Window**: 20480
+* **Context Window**: 32768 (30B-A3B) , 65536 (80B-A3B)
 
 ### Open WebUI
 
