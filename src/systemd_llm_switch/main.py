@@ -148,7 +148,7 @@ class ChatProxy:
 
             logging.info(f"Model request accepted: {target_model}")
 
-            # Force stream=False as requested
+            # Force stream=False to ensure we can repair JSON in the response
             is_stream = False
 
             # Attempt to switch models

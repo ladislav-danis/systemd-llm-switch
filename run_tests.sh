@@ -9,7 +9,7 @@ echo "🚀 I am running the complete SYSTEMD-LLM-SWITCH test suite."
 echo "-----------------------------------------------------------"
 
 # Run all tests in the 'tests' directory
-python3 -m unittest discover -v -p "test_*.py"
+./.venv/bin/python3 -m unittest discover -v -p "test_*.py"
 
 RESULT=$?
 

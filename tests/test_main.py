@@ -67,16 +67,20 @@ class TestModelProxy(unittest.TestCase):
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.content = (
-            b'{"choices": [{"message": {"content": "Python code"}}]}'
-        )
+        mock_response_data = {"choices": [{"message": {"content": "Python code"}}]}
+        mock_response.json.return_value = mock_response_data
+        mock_response.content = json.dumps(mock_response_data).encode('utf-8')
         mock_post.return_value = mock_response
 
         proxy = main.ChatProxy()
         result = proxy.POST()
-        content = self._get_result_content(result)
-
-        self.assertIn(b"Python code", content)
+        # content is a string if it's JSON-encoded result from json.dumps
+        # or bytes if it's resp.content
+        if isinstance(result, bytes):
+            self.assertIn(b"Python code", result)
+        else:
+            self.assertIn("Python code", result)
+        
         # Checking whether it stopped and started
         calls = [str(c) for c in mock_run.call_args_list]
         self.assertTrue(any("stop" in c for c in calls))
@@ -98,9 +102,12 @@ class TestModelProxy(unittest.TestCase):
         mock_run.return_value = MagicMock(stdout="inactive")
         mock_get.return_value = MagicMock(status_code=200)
 
-        mock_post.return_value = MagicMock(
-            status_code=200, content=b'{"thinking": "..."}'
-        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response_data = {"thinking": "..."}
+        mock_response.json.return_value = mock_response_data
+        mock_response.content = json.dumps(mock_response_data).encode('utf-8')
+        mock_post.return_value = mock_response
 
         proxy = main.ChatProxy()
         proxy.POST()
@@ -114,9 +121,9 @@ class TestModelProxy(unittest.TestCase):
 
     @patch('main.subprocess.run')
     @patch('main.requests.post')
-    def test_streaming_enabled(self, mock_post, mock_run):
-        """Test that when stream: True,
-        a generator with the correct content is returned."""
+    def test_streaming_disabled_always(self, mock_post, mock_run):
+        """Test that even when stream: True is requested, 
+        it is forced to False and returns a standard JSON response."""
         main.web._test_data = json.dumps({
             "model": "qwen3-coder-30-a3b-8gb",
             "stream": True,
@@ -126,21 +133,21 @@ class TestModelProxy(unittest.TestCase):
         mock_run.return_value = MagicMock(stdout="active")
 
         mock_response = MagicMock()
-        mock_response.iter_content.return_value = [
-            b'data: {"text": "A"}',
-            b'data: {"text": "B"}'
-        ]
+        mock_response.status_code = 200
+        mock_response_data = {"choices": [{"message": {"content": "Normal response"}}]}
+        mock_response.json.return_value = mock_response_data
         mock_post.return_value = mock_response
 
         proxy = main.ChatProxy()
-        result_gen = proxy.POST()
+        result = proxy.POST()
 
-        # We will exhaust the generator
-        chunks = list(result_gen)
-
-        self.assertEqual(len(chunks), 2)
-        self.assertEqual(chunks[0], b'data: {"text": "A"}')
-        self.assertEqual(chunks[1], b'data: {"text": "B"}')
+        # It should NOT be a generator, but a JSON string (since mock_web mocks it)
+        self.assertIsInstance(result, str)
+        self.assertIn("Normal response", result)
+        
+        # Verify that requests.post was called with stream=False
+        args, kwargs = mock_post.call_args
+        self.assertFalse(kwargs.get('stream'))
 
     @patch('main.subprocess.run')
     def test_invalid_model_error(self, mock_run):
@@ -152,6 +159,45 @@ class TestModelProxy(unittest.TestCase):
 
         self.assertIn("Failed to activate model", result)
         self.assertEqual(main.web.ctx.status, "500 Internal Server Error")
+
+    @patch('main.subprocess.run')
+    @patch('main.requests.post')
+    @patch('main.requests.get')
+    def test_json_repair(self, mock_get, mock_post, mock_run):
+        """Test that malformed JSON in the response is repaired."""
+        main.web._test_data = json.dumps({
+            "model": "qwen3-coder-30-a3b-8gb",
+            "stream": False,
+            "messages": []
+        })
+        mock_run.return_value = MagicMock(stdout="active")
+        mock_get.return_value = MagicMock(status_code=200)
+
+        # Simulating malformed JSON in content
+        malformed_content = '{"key": "value", }' # Trailing comma
+        mock_response_data = {
+            "choices": [{
+                "message": {
+                    "content": malformed_content
+                }
+            }]
+        }
+        
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = mock_response_data
+        mock_post.return_value = mock_response
+
+        proxy = main.ChatProxy()
+        result = proxy.POST()
+        
+        # The result should be valid JSON now
+        parsed_result = json.loads(result)
+        repaired_content = parsed_result["choices"][0]["message"]["content"]
+        
+        # json_repair should fix '{"key": "value", }' to '{"key": "value"}'
+        self.assertIn('"key": "value"', repaired_content)
+        self.assertNotIn(", }", repaired_content)
 
     def test_list_models_endpoint(self):
         """Test that the endpoint /v1/models returns all defined models."""
