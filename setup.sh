@@ -24,7 +24,7 @@ echo "🔗 Configuring and linking service files..."
 PROJECT_ROOT=$(pwd)
 
 # Default values
-DEFAULT_LLAMA_SERVER="$HOME/Develop/llama.cpp/build/bin/llama-server"
+DEFAULT_LLAMA_SERVER="$HOME/llama.cpp/build/bin/llama-server"
 DEFAULT_MODELS_DIR="$HOME/.cache/llama.cpp"
 
 # Ask for llama-server path if not already set

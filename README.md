@@ -112,32 +112,28 @@ llama-server -hf unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF:UD-Q8_K_XL
 llama-server -hf ggml-org/bge-m3-Q8_0-GGUF:Q8_0
 ```
 
-### 3. Clone & Configure This Project
+### 3. Clone & Run Setup
+
+The setup script is now fully automated and interactive. It will:
+- Create a virtual environment and install Python dependencies.
+- **Ask for the path to your `llama-server` binary** (defaulting to `~/llama.cpp/build/bin/llama-server`).
+- **Ask for your models directory** (defaulting to `~/.cache/llama.cpp`).
+- Dynamically patch all systemd service files with the correct paths.
+- Link the services to your user-level systemd directory.
 
 ```bash
 # Clone this repository
 git clone https://github.com/ladislav-danis/systemd-llm-switch.git
 cd systemd-llm-switch
-```
 
-#### ⚠️ Configure Model Services
-
-Before running the setup script, you should check the model service files in `deploy/systemd/` to ensure they point to your `llama-server` binary and GGUF files.
-
-**The setup script will automatically handle paths for the project itself using the `{{PROJECT_ROOT}}` placeholder.**
-
-1.  Open `deploy/systemd/qwen3-coder.service` (and others).
-2.  Update the `--model` path to the absolute path of your GGUF file if it's not in the default location.
-3.  The `WorkingDirectory` and `ExecStart` for the proxy itself are handled automatically.
-
-### 4. Run Setup
-
-The setup script will create a virtual environment, install dependencies, **dynamically patch all service files with the current project path**, and link them to your user systemd directory.
-
-```bash
+# Run the setup
 chmod +x setup.sh
 ./setup.sh
 ```
+
+During setup, you will see prompts like this:
+- `📂 Path to your llama-server binary [default: /home/user/llama.cpp/build/bin/llama-server]:`
+- `📂 Directory where your GGUF models are stored [default: /home/user/.cache/llama.cpp]:`
 
 ---
 
