@@ -5,14 +5,14 @@ After=network.target
 [Service]
 Type=simple
 
-ExecStart=/home/spravce/llama/systemd-llm-switch/.venv/bin/python /home/spravce/llama/systemd-llm-switch/src/systemd_llm_switch/main.py
+ExecStart={{PROJECT_ROOT}}/.venv/bin/python {{PROJECT_ROOT}}/src/systemd_llm_switch/main.py
 
-WorkingDirectory=/home/spravce/llama/systemd-llm-switch/src/systemd_llm_switch/
+WorkingDirectory={{PROJECT_ROOT}}/src/systemd_llm_switch/
 
 Restart=always
 RestartSec=5
 
-Environment="PATH=/home/spravce/llama/systemd-llm-switch/.venv/bin"
+Environment="PATH={{PROJECT_ROOT}}/.venv/bin"
 
 [Install]
 WantedBy=default.target

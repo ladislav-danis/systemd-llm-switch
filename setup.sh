@@ -23,10 +23,14 @@ fi
 echo "🔗 Patching and linking service files..."
 PROJECT_ROOT=$(pwd)
 
-# Patch llm-switch.service with current path
-sed -i "s|/home/spravce/llama/systemd-llm-switch|$PROJECT_ROOT|g" deploy/systemd/llm-switch.service
-
+# Patch all .service files with current path
 for service in deploy/systemd/*.service; do
+    echo "  - Patching and linking $service"
+    # Replace the placeholder {{PROJECT_ROOT}}
+    # with the actual current directory
+    sed -i "s|{{PROJECT_ROOT}}|$PROJECT_ROOT|g" "$service"
+    
+    # Create symlink in systemd user directory
     ln -sf "$PROJECT_ROOT/$service" ~/.config/systemd/user/
 done
 
