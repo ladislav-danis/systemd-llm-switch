@@ -7,6 +7,7 @@ import threading
 import yaml
 import sys
 import logging
+from json_repair import repair_json
 from pathlib import Path
 from typing import Optional
 
@@ -147,7 +148,8 @@ class ChatProxy:
 
             logging.info(f"Model request accepted: {target_model}")
 
-            is_stream = data.get("stream", False)
+            # Force stream=False as requested
+            is_stream = False
 
             # Attempt to switch models
             if not self.switch_model(target_model):
@@ -183,7 +185,29 @@ class ChatProxy:
             else:
                 # Classic JSON response
                 web.header('Content-Type', 'application/json')
-                return resp.content
+                
+                try:
+                    resp_data = resp.json()
+                    # If it's a chat completion, try to repair the content of the message
+                    if "choices" in resp_data and len(resp_data["choices"]) > 0:
+                        message = resp_data["choices"][0].get("message", {})
+                        content = message.get("content", "")
+                        
+                        if content:
+                            try:
+                                # If it's already valid JSON, leave it as is
+                                json.loads(content)
+                            except json.JSONDecodeError:
+                                # Only attempt repair if it looks like it's trying to be JSON
+                                if "{" in content or "[" in content:
+                                    logging.info("Attempting to repair malformed JSON in message content.")
+                                    repaired_content = repair_json(content)
+                                    message["content"] = repaired_content
+                    
+                    return json.dumps(resp_data)
+                except Exception as e:
+                    logging.warning(f"Could not parse or repair backend response: {e}")
+                    return resp.content
 
         except json.JSONDecodeError:
             web.ctx.status = "400 Bad Request"
