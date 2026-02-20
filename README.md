@@ -114,6 +114,31 @@ llama-server -hf ggml-org/bge-m3-Q8_0-GGUF:Q8_0
 
 ### 3. Clone & Configure This Project
 
+```bash
+# Clone this repository
+git clone https://github.com/ladislav-danis/systemd-llm-switch.git
+cd systemd-llm-switch
+```
+
+#### ⚠️ Configure Model Services
+
+Before running the setup script, you should check the model service files in `deploy/systemd/` to ensure they point to your `llama-server` binary and GGUF files.
+
+**The setup script will automatically handle paths for the project itself using the `{{PROJECT_ROOT}}` placeholder.**
+
+1.  Open `deploy/systemd/qwen3-coder.service` (and others).
+2.  Update the `--model` path to the absolute path of your GGUF file if it's not in the default location.
+3.  The `WorkingDirectory` and `ExecStart` for the proxy itself are handled automatically.
+
+### 4. Run Setup
+
+The setup script will create a virtual environment, install dependencies, **dynamically patch all service files with the current project path**, and link them to your user systemd directory.
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
 ---
 
 ## 🚀 Performance & Optimization
@@ -129,29 +154,15 @@ The default configuration is highly optimized for **8GB VRAM** systems using a s
 
 *If there is interest, I can also provide tuned configurations for **16 GB, 24GB, or 32GB (2x16GB)** setups.*
 
-```bash
-# Clone this repository
-git clone https://github.com/ladislav-danis/systemd-llm-switch.git
-cd systemd-llm-switch
-```
+---
 
-#### ⚠️ Critical: Configure Paths
+## ✨ Features
 
-Before running the setup script, you **must** update the model service files in `deploy/systemd/` to point to your `llama-server` binary and your model files.
+### 🛠️ Automatic JSON Repair
+The proxy includes an integrated **JSON repair mechanism** using the `json-repair` library. This is especially useful when using smaller models or high quantization levels that might occasionally output malformed JSON (e.g., missing braces or trailing commas).
 
-1.  Open `deploy/systemd/qwen3-coder.service` (and others).
-2.  Update `WorkingDirectory` to point to your `llama.cpp` build directory.
-3.  Update `ExecStart` to point to your `llama-server` binary.
-4.  Update the `--model` path to the absolute path of your GGUF file.
-
-### 4. Run Setup
-
-The setup script will create a virtual environment, install dependencies, patch the main service with the current path, and link all services to your user systemd directory.
-
-```bash
-chmod +x setup.sh
-./setup.sh
-```
+### ⚡ Forced Non-Streaming
+To ensure the JSON repair logic can always process the full response, the proxy **forces `stream=False`** for all requests. This ensures maximum reliability for IDE integrations (like Roo Code) that depend on valid JSON structures for tool calling and structured data.
 
 ---
 
