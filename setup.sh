@@ -20,9 +20,14 @@ if [ -f "requirements.txt" ]; then
 fi
 
 # 4. Connecting ALL services (so that they can be run via systemctl)
-echo "🔗 Linking service files..."
+echo "🔗 Patching and linking service files..."
+PROJECT_ROOT=$(pwd)
+
+# Patch llm-switch.service with current path
+sed -i "s|/home/spravce/llama/systemd-llm-switch|$PROJECT_ROOT|g" deploy/systemd/llm-switch.service
+
 for service in deploy/systemd/*.service; do
-    ln -sf "$(pwd)/$service" ~/.config/systemd/user/
+    ln -sf "$PROJECT_ROOT/$service" ~/.config/systemd/user/
 done
 
 systemctl --user daemon-reload

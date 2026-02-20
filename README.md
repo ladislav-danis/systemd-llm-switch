@@ -76,49 +76,55 @@ flowchart TD
 
 ## 🛠️ Installation & Setup
 
-**llama.cpp**
-```
-# 1. Clone repository
-https://github.com/ggml-org/llama.cpp.git
+### 1. Build llama.cpp (Required)
 
-#2. Code Update (Optional but Recommended)
-git pull
-git submodule update --init --recursive
+You need `llama.cpp` installed on your system. If you haven't built it yet, follow these steps:
 
-# 3. Cleaning up the old build
-rm -rf build-cuda
-mkdir build-cuda
-cd build-cuda
-
-# 4. Configuring CMake with CUDA flag
-cmake .. -DGGML_CUDA=ON
-
-# 5. Compilation (uses all available cores for speed)
-cmake --build . --config Release -j $(nproc)
-
-# 6. After building, you'll need to:
-#    - Download the required models using the llama-server command
-#    - Update model paths in systemd service files according to your system setup
-#      (e.g., change /home/spravce/llama/model/ to your actual model path)
-```
-
-1. **Clone the repository:**
 ```bash
-git clone <repository-url>
-cd systemd-llm-switch
+# Clone llama.cpp repository
+git clone https://github.com/ggml-org/llama.cpp.git
+cd llama.cpp
 
+# Configure and build with CUDA support
+mkdir build && cd build
+cmake .. -DGGML_CUDA=ON
+cmake --build . --config Release -j $(nproc)
 ```
 
-2. **Run the setup script:**
+### 2. Download Models
+
+Download the GGUF models you want to use. We recommend the `unsloth` versions for optimal performance on 8GB VRAM.
+
+```bash
+# Example using llama-server (if installed in your path)
+llama-server -hf unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF --model qwen3-coder-30b.gguf
+```
+
+### 3. Clone & Configure This Project
+
+```bash
+# Clone this repository
+git clone https://github.com/ladislav-danis/systemd-llm-switch.git
+cd systemd-llm-switch
+```
+
+#### ⚠️ Critical: Configure Paths
+
+Before running the setup script, you **must** update the model service files in `deploy/systemd/` to point to your `llama-server` binary and your model files.
+
+1.  Open `deploy/systemd/qwen3-coder.service` (and others).
+2.  Update `WorkingDirectory` to point to your `llama.cpp` build directory.
+3.  Update `ExecStart` to point to your `llama-server` binary.
+4.  Update the `--model` path to the absolute path of your GGUF file.
+
+### 4. Run Setup
+
+The setup script will create a virtual environment, install dependencies, patch the main service with the current path, and link all services to your user systemd directory.
+
 ```bash
 chmod +x setup.sh
 ./setup.sh
-
 ```
-
-*The script creates a virtual environment, installs dependencies, and links the systemd services.*
-3. **Configure Models:**
-Adjust model paths in the files within `deploy/systemd/` and update the mappings in `src/systemd_llm_switch/config.yaml`.
 
 ---
 

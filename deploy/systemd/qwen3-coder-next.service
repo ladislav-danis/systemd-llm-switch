@@ -7,11 +7,11 @@ After=network.target nvidia-persistenced.service
 
 [Service]
 # Working directory where the llama-server executable is located
-WorkingDirectory=/home/spravce/llama/llama.cpp/build-cuda
+WorkingDirectory=/path/to/your/llama/llama.cpp/build-cuda
 
 # Main command to start the llama-server with various parameters
-ExecStart=/home/spravce/llama/llama.cpp/build-cuda/bin/llama-server \
---model /home/spravce/llama/model/Qwen_Qwen3-Coder-Next-GGUF_Qwen3-Coder-Next-Q4_K_M_Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf \
+ExecStart=/path/to/your/llama/llama.cpp/build-cuda/bin/llama-server \
+--model /path/to/your/llama/model/Qwen_Qwen3-Coder-Next-GGUF_Qwen3-Coder-Next-Q4_K_M_Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf \
 --threads 3 \
 -np 1 \
 --batch-size 1024 \
