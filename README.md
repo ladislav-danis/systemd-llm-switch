@@ -93,14 +93,41 @@ cmake --build . --config Release -j $(nproc)
 
 ### 2. Download Models
 
-Download the GGUF models you want to use. We recommend the `unsloth` versions for optimal performance on 8GB VRAM.
+You can use the `llama-server` command to download the recommended GGUF models directly from Hugging Face. These versions are optimized for the memory management used in this project:
 
 ```bash
-# Example using llama-server (if installed in your path)
-llama-server -hf unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF --model qwen3-coder-30b.gguf
+# Qwen3 Coder Next (80B) - Q4_K_M
+llama-server -hf Qwen/Qwen3-Coder-Next-GGUF:Q4_K_M
+
+# Qwen3 Coder 30B - Q8_K_XL
+llama-server -hf unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:UD-Q8_K_XL
+
+# Qwen3 Thinking Next (80B) - Q4_K_XL
+llama-server -hf unsloth/Qwen3-Next-80B-A3B-Thinking-GGUF:UD-Q4_K_XL
+
+# Qwen3 Thinking 30B - Q8_K_XL
+llama-server -hf unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF:UD-Q8_K_XL
+
+# BGE-M3 Embedding - Q8_0
+llama-server -hf ggml-org/bge-m3-Q8_0-GGUF:Q8_0
 ```
 
 ### 3. Clone & Configure This Project
+
+---
+
+## 🚀 Performance & Optimization
+
+### VRAM & Offloading
+
+The default configuration is highly optimized for **8GB VRAM** systems using a split-layer MoE (Mixture of Experts) approach.
+
+*   **Default Behavior**: It uses `--n-gpu-layers 49` and a specific `--override-tensor` regex to force heavy MoE calculations to the CPU, keeping the model within 8GB VRAM.
+*   **High-End Systems**: If you have more RAM/VRAM (e.g., 12GB, 16GB, or 24GB), you should:
+    1.  **Adjust the regex**: Modify the `override-tensor` pattern in the `.service` files to allow more experts to stay on the GPU (reducing CPU offloading).
+    2.  **Monitor with `nvtop`**: Use `nvtop` to watch VRAM usage in real-time while adjusting parameters to find the perfect balance between speed and memory limits.
+
+*If there is interest, I can also provide tuned configurations for **16 GB, 24GB, or 32GB (2x16GB)** setups.*
 
 ```bash
 # Clone this repository
