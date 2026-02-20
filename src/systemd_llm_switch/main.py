@@ -191,18 +191,28 @@ class ChatProxy:
                     # If it's a chat completion, try to repair the content of the message
                     if "choices" in resp_data and len(resp_data["choices"]) > 0:
                         message = resp_data["choices"][0].get("message", {})
-                        content = message.get("content", "")
                         
+                        # 1. Repair main content if needed
+                        content = message.get("content", "")
                         if content:
                             try:
-                                # If it's already valid JSON, leave it as is
                                 json.loads(content)
                             except json.JSONDecodeError:
-                                # Only attempt repair if it looks like it's trying to be JSON
                                 if "{" in content or "[" in content:
-                                    logging.info("Attempting to repair malformed JSON in message content.")
-                                    repaired_content = repair_json(content)
-                                    message["content"] = repaired_content
+                                    logging.info("Repairing malformed JSON in 'content'.")
+                                    message["content"] = repair_json(content)
+
+                        # 2. Repair tool_calls arguments if present
+                        tool_calls = message.get("tool_calls", [])
+                        for tool in tool_calls:
+                            func = tool.get("function", {})
+                            args = func.get("arguments", "")
+                            if args:
+                                try:
+                                    json.loads(args)
+                                except json.JSONDecodeError:
+                                    logging.info(f"Repairing malformed JSON in tool '{func.get('name')}' arguments.")
+                                    func["arguments"] = repair_json(args)
                     
                     return json.dumps(resp_data)
                 except Exception as e:
