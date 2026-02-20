@@ -137,6 +137,27 @@ During setup, you will see prompts like this:
 
 ---
 
+## ⚙️ Model Configuration (`config.yaml`)
+
+The system is designed to be easily extensible. You can manage which models are available to your clients by editing `src/systemd_llm_switch/config.yaml`.
+
+### Adding a New Model
+
+1.  **Create a systemd service**: Create a new `.service` file in `deploy/systemd/` (you can use existing ones as a template).
+2.  **Run setup**: Run `./setup.sh` again to link the new service and update paths.
+3.  **Update `config.yaml`**: Add the new model ID and its corresponding service name to the `models` section:
+
+```yaml
+models:
+  my-new-model: "my-new-model.service"
+```
+
+### Removing a Model
+
+To remove a model, simply delete or comment out its line in the `models` section of `config.yaml`. The proxy will immediately stop recognizing that model ID.
+
+---
+
 ## 🚀 Performance & Optimization
 
 ### VRAM & Offloading
