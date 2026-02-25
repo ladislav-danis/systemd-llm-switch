@@ -191,21 +191,13 @@ class ChatProxy:
                     choices = resp_data.get("choices", [])
                     if choices:
                         message = resp_data["choices"][0].get("message", {})
-                        # 1. Repair main content if needed
-                        content = message.get("content", "")
-                        if content:
-                            try:
-                                json.loads(content)
-                            except json.JSONDecodeError:
-                                if "{" in content or "[" in content:
-                                    logging.info("Repairing JSON in content")
-                                    message["content"] = repair_json(content)
 
-                        # 2. Repair tool_calls arguments if present
+                        # 1. Ensure content is null if tool_calls present (standard OpenAI)
                         tool_calls = message.get("tool_calls", [])
                         if tool_calls and not message.get("content"):
                             message["content"] = None
 
+                        # 2. Repair tool_calls arguments if present
                         for tool in tool_calls:
                             func = tool.get("function", {})
                             args = func.get("arguments", "")
