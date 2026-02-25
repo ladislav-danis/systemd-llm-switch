@@ -183,10 +183,16 @@ The default configuration is highly optimized for **8GB VRAM** systems using a s
 ## ✨ Features
 
 ### 🛠️ Automatic JSON Repair
-The proxy includes an integrated **JSON repair mechanism** using the `json-repair` library. This is especially useful when using smaller models or high quantization levels that might occasionally output malformed JSON (e.g., missing braces or trailing commas).
+The proxy includes an integrated **JSON repair mechanism** using the [`json-repair`](https://github.com/joakim-lydell/json-repair) library. This is especially useful when using smaller models or high quantization levels that might occasionally output malformed JSON (e.g., missing braces or trailing commas).
+
+The repair mechanism works on two levels:
+1. **Message content repair**: Attempts to repair malformed JSON in the main message content field
+2. **Tool call arguments repair**: Repairs JSON in tool call function arguments when using tool calling functionality
 
 ### ⚡ Forced Non-Streaming
 To ensure the JSON repair logic can always process the full response, the proxy **forces `stream=False`** for all requests. This ensures maximum reliability for IDE integrations (like Roo Code) that depend on valid JSON structures for tool calling and structured data.
+
+The implementation uses a threading lock ([`threading.Lock()`](src/systemd_llm_switch/main.py:84)) to prevent VRAM race conditions when switching between models.
 
 ---
 
@@ -219,8 +225,24 @@ systemctl --user stop qwen3-coder-flash.service qwen3-coder-next.service qwen3-t
 
 The project includes a test suite to verify correct setup:
 
-* **Unit Tests**: `run_tests.sh` verifies the integrity of the Python code.
-* **Smoke Test**: `python3 tests/test_smoke.py` performs a real request to the proxy to verify the model starts and responds correctly.
+* **Unit Tests**: Run `./run_tests.sh` to execute the unit tests and verify the integrity of the Python code.
+* **Smoke Test**: Execute `python3 tests/test_smoke.py` to perform a real request to the proxy and verify the model starts and responds correctly.
+
+### Running Tests
+
+```bash
+# Run all tests
+./run_tests.sh
+
+# Run only the smoke test
+python3 tests/test_smoke.py
+```
+
+The smoke test will:
+1. Start the proxy server
+2. Make a test request to list available models
+3. Attempt to switch to a model and make a chat completion request
+4. Verify the response is valid JSON
 
 ---
 
@@ -245,19 +267,22 @@ Add a new OpenAI connection with the URL `http://localhost:3002/v1`.
 ```
 systemd-llm-switch/
 ├── AGENTS.md
+├── LICENSE.md
 ├── README.md
 ├── requirements.txt
 ├── setup.sh
 ├── run_tests.sh
+├── test_requirements.txt
 ├── deploy/
 │   └── systemd/
 │       ├── bge-m3.service
 │       ├── llm-switch.service
 │       ├── qwen3-coder-flash.service
 │       ├── qwen3-coder-next.service
-│       ├── qwen3-thinking.service
-│       └── qwen3-thinking-next.service
+│       ├── qwen3-thinking-next.service
+│       └── qwen3-thinking.service
 ├── src/
+│   ├── __init__.py
 │   └── systemd_llm_switch/
 │       ├── __init__.py
 │       ├── config.yaml
@@ -270,5 +295,64 @@ systemd-llm-switch/
 
 **Descriptions:**
 - `deploy/systemd/`: Contains systemd service files for each model instance.
+- `src/`: Root source directory with package initialization.
 - `src/systemd_llm_switch/`: Main application code (config, proxy logic).
 - `tests/`: Test suite for validation.
+
+---
+
+## 🛠️ Troubleshooting
+
+### Common Issues
+
+#### Model fails to start
+**Symptoms**: Request times out or returns "Model X did not start on time"
+
+**Solutions**:
+1. Check if the model file exists in your models directory
+2. Verify the service file paths point to the correct `llama-server` binary
+3. Check logs with `journalctl --user -u <service-name>.service -f`
+4. Ensure sufficient VRAM is available (stop other models first)
+
+#### Service not found
+**Symptoms**: `Failed to activate model X` error
+
+**Solutions**:
+1. Run `./setup.sh` to ensure services are properly linked
+2. Verify the service file exists in `~/.config/systemd/user/`
+3. Check that the model ID in your request matches an entry in `config.yaml`
+
+#### VRAM overflow
+**Symptoms**: `llama-server` crashes or OOM killer terminates the process
+
+**Solutions**:
+1. Stop all models with `systemctl --user stop qwen3-*.service bge-m3.service`
+2. Adjust the `--n-gpu-layers` and `--override-tensor` parameters in your service files
+3. For 8GB VRAM systems, ensure you're using the optimized configuration with MoE offloading
+
+#### Connection refused
+**Symptoms**: `Connection refused` when trying to reach the proxy
+
+**Solutions**:
+1. Ensure the proxy service is running: `systemctl --user status llm-switch.service`
+2. Check if the proxy is listening on port 3002: `netstat -tuln | grep 3002`
+3. Restart the proxy service: `systemctl --user restart llm-switch.service`
+
+### Debug Mode
+
+To enable more verbose logging, modify the logging level in [`src/systemd_llm_switch/main.py`](src/systemd_llm_switch/main.py:21):
+
+```python
+logging.basicConfig(
+    level=logging.DEBUG,  # Changed from INFO to DEBUG
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+```
+
+### Getting Help
+
+If you encounter issues not covered here, please check:
+1. The systemd logs: `journalctl --user -u llm-switch.service -f`
+2. The model-specific logs: `journalctl --user -u qwen3-coder-flash.service -f`
+3. Ensure `loginctl enable-linger $USER` is set to keep services running after logout
