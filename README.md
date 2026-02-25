@@ -54,7 +54,7 @@ flowchart TD
     
     subgraph "Systemd Layer"
         Systemctl[systemctl --user]
-        Services[Multiple LLM Services<br/>qwen3-coder.service<br/>qwen3-thinking.service<br/>qwen3-coder-next.service<br/>qwen3-thinking-next.service<br/>bge-embedding.service]
+        Services[Multiple LLM Services<br/>qwen3-coder-flash.service<br/>qwen3-thinking.service<br/>qwen3-coder-next.service<br/>qwen3-thinking-next.service<br/>bge-m3.service]
     end
     
     subgraph "Backend Layer"
@@ -96,20 +96,20 @@ cmake --build . --config Release -j $(nproc)
 You can use the `llama-server` command to download the recommended GGUF models directly from Hugging Face. These versions are optimized for the memory management used in this project:
 
 ```bash
-# Qwen3 Coder Next (80B) - Q4_K_M
-llama-server -hf Qwen/Qwen3-Coder-Next-GGUF:Q4_K_M
+# Qwen3 Coder Next (80B) - UD-Q4_K_XL
+llama-server -hf unsloth/Qwen3-Coder-Next-GGUF:UD-Q4_K_XL
 
-# Qwen3 Coder 30B - Q8_K_XL
+# Qwen3 Coder Flash 30B - UD-Q8_K_XL
 llama-server -hf unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:UD-Q8_K_XL
 
-# Qwen3 Thinking Next (80B) - Q4_K_XL
+# Qwen3 Thinking Next (80B) - UD-Q4_K_XL
 llama-server -hf unsloth/Qwen3-Next-80B-A3B-Thinking-GGUF:UD-Q4_K_XL
 
-# Qwen3 Thinking 30B - Q8_K_XL
+# Qwen3 Thinking 30B - UD-Q8_K_XL
 llama-server -hf unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF:UD-Q8_K_XL
 
-# BGE-M3 Embedding - Q8_0
-llama-server -hf ggml-org/bge-m3-Q8_0-GGUF:Q8_0
+# BGE-M3 Embedding - bge-m3-q8_0
+llama-server -hf ggml-org/bge-m3-Q8_0-GGUF:bge-m3-q8_0.gguf
 ```
 
 ### 3. Clone & Run Setup
@@ -145,11 +145,18 @@ The system is designed to be easily extensible. You can manage which models are 
 
 1.  **Create a systemd service**: Create a new `.service` file in `deploy/systemd/` (you can use existing ones as a template).
 2.  **Run setup**: Run `./setup.sh` again to link the new service and update paths.
-3.  **Update `config.yaml`**: Add the new model ID and its corresponding service name to the `models` section:
+3.  **Update `config.yaml`**: Add the new model ID and its corresponding service name to the `models` section.
+
+Default `config.yaml` from this repository:
 
 ```yaml
 models:
-  my-new-model: "my-new-model.service"
+  qwen3-coder-flash: "qwen3-coder-flash.service"
+  qwen3-coder-next: "qwen3-coder-next.service"
+  bge-m3: "bge-m3.service"
+  # You can also add these if you have them downloaded:
+  # qwen3-thinking: "qwen3-thinking.service"
+  # qwen3-thinking-next: "qwen3-thinking-next.service"
 ```
 
 ### Removing a Model
@@ -190,9 +197,9 @@ The project utilizes `systemd --user`, so it does not require root privileges fo
 | Service | Purpose | Model |
 | --- | --- | --- |
 | `llm-switch.service` | Main Proxy Server | `main.py` |
-| `qwen3-coder.service` | Coding & Syntax | Qwen3-Coder-30B (Q8_K_XL) |
-| `qwen3-thinking.service` | Logic & Planning | Qwen3-Thinking-30B (Q8_K_XL) |
+| `qwen3-coder-flash.service` | Coding & Syntax | Qwen3-Coder-30B (Q8_K_XL) |
 | `qwen3-coder-next.service` | Coding & Syntax | Qwen3-Coder-80B (Q4_K_XL) |
+| `qwen3-thinking.service` | Logic & Planning | Qwen3-Thinking-30B (Q8_K_XL) |
 | `qwen3-thinking-next.service` | Logic & Planning | Qwen3-Thinking-80B (Q4_K_XL) |
 | `bge-m3.service` | Vector Search (RAG) | BGE-M3 (Q8_0) |
 
@@ -202,9 +209,8 @@ The project utilizes `systemd --user`, so it does not require root privileges fo
 # Monitor proxy logs (including model switching)
 journalctl --user -u llm-switch.service -f
 
-# Manually stop all models (to free VRAM for gaming or other work)
-systemctl --user stop qwen3-coder.service qwen3-thinking.service
-
+# Manually stop models (to free VRAM for gaming or other work)
+systemctl --user stop qwen3-coder-flash.service qwen3-coder-next.service qwen3-thinking.service qwen3-thinking-next.service bge-m3.service
 ```
 
 ---
@@ -224,7 +230,7 @@ The project includes a test suite to verify correct setup:
 
 * **Provider**: OpenAI Compatible
 * **Base URL**: `http://localhost:3002/v1`
-* **Model ID**: `qwen3-coder-30-a3b-8gb`, `qwen3-thinking-30-a3b-8gb`, `qwen3-coder-80-a3b-8gb`, or `qwen3-thinking-80-a3b-8gb`
+* **Model ID**: `qwen3-coder-flash`, `qwen3-coder-next`, or `bge-m3` (and others if configured in `config.yaml`)
 * **Context Window**: 32768 (30B-A3B) , 65536 (80B-A3B)
 
 ### Open WebUI
@@ -232,7 +238,7 @@ The project includes a test suite to verify correct setup:
 Add a new OpenAI connection with the URL `http://localhost:3002/v1`.
 
 ### Models download llama.cpp command
-`llama-server -hf unsloth/Qwen3-Coder-Next-GGUF:Q4_K_XL`
+`llama-server -hf unsloth/Qwen3-Coder-Next-GGUF:UD-Q4_K_XL`
 
 ## 🗺️ Repository Structure
 
@@ -245,9 +251,9 @@ systemd-llm-switch/
 ├── run_tests.sh
 ├── deploy/
 │   └── systemd/
-│       ├── bge-embedding.service
+│       ├── bge-m3.service
 │       ├── llm-switch.service
-│       ├── qwen3-coder.service
+│       ├── qwen3-coder-flash.service
 │       ├── qwen3-coder-next.service
 │       ├── qwen3-thinking.service
 │       └── qwen3-thinking-next.service

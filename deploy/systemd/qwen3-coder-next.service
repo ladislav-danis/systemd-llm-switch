@@ -1,6 +1,6 @@
 [Unit]
 # Description of the service
-Description=Llama-CPP Server (Qwen3-Coder-80B-A3B-8GB)
+Description=Llama-CPP Server (Qwen3-Coder-Next)
 # Service should start after network and nvidia services are available
 After=network.target
 After=network.target nvidia-persistenced.service
@@ -11,7 +11,7 @@ WorkingDirectory={{LLAMA_BIN_DIR}}
 
 # Main command to start the llama-server with various parameters
 ExecStart={{LLAMA_SERVER_PATH}} \
---model {{MODELS_DIR}}/Qwen_Qwen3-Coder-Next-GGUF_Qwen3-Coder-Next-Q4_K_M_Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf \
+--model {{MODELS_DIR}}/unsloth_Qwen3-Coder-Next-GGUF_Qwen3-Coder-Next-UD-Q4_K_XL.gguf \
 --threads 3 \
 -np 1 \
 --batch-size 1024 \
@@ -22,7 +22,7 @@ ExecStart={{LLAMA_SERVER_PATH}} \
 --jinja \
 --temp 1.0 --min-p 0.01 --top-p 0.95 --top-k 40 \
 --flash-attn on \
--a qwen3-coder-80-a3b-8gb \
+-a qwen3-coder-next \
 --n-gpu-layers 49 \
 --override-tensor ".*blk\.([4-9]|[1-3][0-9]|4[0-8])\.ffn_.*_exps.*=CPU" \
 --host 0.0.0.0 \

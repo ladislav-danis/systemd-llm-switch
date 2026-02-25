@@ -10,7 +10,7 @@ WorkingDirectory={{LLAMA_BIN_DIR}}
 
 # Main command to start the llama-server with various parameters
 ExecStart={{LLAMA_SERVER_PATH}} \
---model /path/to/your/llama/ggml-org_bge-m3-Q8_0-GGUF_bge-m3-q8_0.gguf \
+--model {{MODELS_DIR}}/ggml-org_bge-m3-Q8_0-GGUF_bge-m3-q8_0.gguf \
 -np 1 \
 --threads 3 \
 --batch-size 2048 \
