@@ -170,30 +170,38 @@ class TestModelProxy(unittest.TestCase):
         self.assertIn("Failed to activate model", result)
         self.assertEqual(main.web.ctx.status, "500 Internal Server Error")
 
-    @patch('main.subprocess.run')  # noqa: E266
+    @patch('main.subprocess.run')
     @patch('main.requests.post')
     @patch('main.requests.get')
-    def test_json_repair(self, mock_get, mock_post, mock_run):
-        """Test that malformed JSON in the response is repaired."""
+    def test_tool_call_content_null_and_repair(self, mock_get, mock_post, mock_run):
+        """Test that content is set to null when tool_calls are present
+        and that tool_calls arguments are repaired."""
         main.web._test_data = json.dumps({
             "model": "qwen3-coder-flash",
             "stream": False,
-            "messages": []
+            "messages": [{"role": "user", "content": "Get weather"}]
         })
-        mock_run.return_value = MagicMock(stdout="active")  # noqa: E501
+        mock_run.return_value = MagicMock(stdout="active")
         mock_get.return_value = MagicMock(status_code=200)
 
-        # Simulating malformed JSON in content
-        malformed_content = '{"key": "value", }'  # Trailing comma
+        # Simulating response with tool_calls and malformed arguments
         mock_response_data = {
             "choices": [{
                 "message": {
-                    "content": malformed_content  # noqa: E501
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"location": "Prague", }' # Trailing comma
+                        }
+                    }]
                 }
             }]
         }
 
-        mock_response = MagicMock()  # noqa: E501
+        mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = mock_response_data
         mock_post.return_value = mock_response
@@ -201,13 +209,44 @@ class TestModelProxy(unittest.TestCase):
         proxy = main.ChatProxy()
         result = proxy.POST()
 
-        # The result should be valid JSON now
         parsed_result = json.loads(result)
-        repaired_content = parsed_result["choices"][0]["message"]["content"]
+        message = parsed_result["choices"][0]["message"]
 
-        # json_repair should fix '{"key": "value", }' to '{"key": "value"}'
-        self.assertIn('"key": "value"', repaired_content)
-        self.assertNotIn(", }", repaired_content)
+        # 1. Check if content is null
+        self.assertIsNone(message["content"])
+
+        # 2. Check if arguments are repaired
+        repaired_args = message["tool_calls"][0]["function"]["arguments"]
+        self.assertEqual(repaired_args, '{"location": "Prague"}')
+
+    @patch('main.subprocess.run')
+    @patch('main.requests.post')
+    @patch('main.requests.get')
+    def test_no_json_repair_in_content(self, mock_get, mock_post, mock_run):
+        """Test that main content is NOT repaired even if it looks like malformed JSON."""
+        main.web._test_data = json.dumps({
+            "model": "qwen3-coder-flash",
+            "messages": [{"role": "user", "content": "Give me example"}]
+        })
+        mock_run.return_value = MagicMock(stdout="active")
+        mock_get.return_value = MagicMock(status_code=200)
+
+        malformed_json_text = 'Here is bad json: {"key": "value", }'
+        mock_response_data = {
+            "choices": [{"message": {"content": malformed_json_text}}]
+        }
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = mock_response_data
+        mock_post.return_value = mock_response
+
+        proxy = main.ChatProxy()
+        result = proxy.POST()
+
+        parsed_result = json.loads(result)
+        # Content should remain exactly as it was
+        self.assertEqual(parsed_result["choices"][0]["message"]["content"], malformed_json_text)
 
     def test_list_models_endpoint(self):
         """Test that the endpoint /v1/models returns all defined models."""

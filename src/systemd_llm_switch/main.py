@@ -206,8 +206,10 @@ class ChatProxy:
                                     json.loads(args)
                                 except json.JSONDecodeError:
                                     tool_name = func.get("name", "unknown")
-                                    msg = "Repairing JSON in tool '%s' args"
-                                    logging.info("%s", msg, tool_name)
+                                    logging.info(
+                                        "Repairing JSON in tool '%s' args",
+                                        tool_name
+                                    )
                                     func["arguments"] = repair_json(args)
                     return json.dumps(resp_data)
                 except Exception as e:

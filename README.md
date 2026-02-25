@@ -182,12 +182,16 @@ The default configuration is highly optimized for **8GB VRAM** systems using a s
 
 ## ✨ Features
 
-### 🛠️ Automatic JSON Repair
-The proxy includes an integrated **JSON repair mechanism** using the [`json-repair`](https://github.com/joakim-lydell/json-repair) library. This is especially useful when using smaller models or high quantization levels that might occasionally output malformed JSON (e.g., missing braces or trailing commas).
+### 🛠️ Targeted JSON Repair
+The proxy includes an integrated **JSON repair mechanism** using the [`json-repair`](https://github.com/joakim-lydell/json-repair) library. This is specifically tuned to handle malformed JSON in **tool call arguments**, which can occur with smaller models or high quantization levels.
 
-The repair mechanism works on two levels:
-1. **Message content repair**: Attempts to repair malformed JSON in the main message content field
-2. **Tool call arguments repair**: Repairs JSON in tool call function arguments when using tool calling functionality
+*   **Tool call arguments repair**: Automatically repairs JSON in tool call function arguments to ensure clients receive valid structures.
+*   **Safe content handling**: The main message content is **never** modified by the repair logic, ensuring that code blocks, prose, and intentional formatting remain exactly as the model generated them.
+
+### 🏛️ OpenAI Standard Compliance
+To ensure maximum compatibility with strict OpenAI-compatible clients (like Aider, Cursor, or Cline):
+*   **Null Content**: When a model initiates a `tool_calls` response, the `content` field is explicitly set to `null` instead of an empty string, adhering to the OpenAI API specification.
+*   **Structured Output**: All internal transformations are designed to maintain a valid OpenAI-compatible JSON schema even when the backend provides slightly irregular outputs.
 
 ### ⚡ Forced Non-Streaming
 To ensure the JSON repair logic can always process the full response, the proxy **forces `stream=False`** for all requests. This ensures maximum reliability for IDE integrations (like Roo Code) that depend on valid JSON structures for tool calling and structured data.
