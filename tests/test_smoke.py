@@ -3,7 +3,7 @@ import time
 import sys
 
 PROXY_URL = "http://localhost:3002/v1/chat/completions"
-TEST_MODEL = "qwen3-coder-30-a3b-8gb"
+TEST_MODEL = "qwen3-coder-flash"
 
 
 def run_smoke_test():

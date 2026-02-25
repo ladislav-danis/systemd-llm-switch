@@ -30,11 +30,10 @@ class TestModelProxy(unittest.TestCase):
                 'llama_url': 'http://localhost:3004'
             },
             'models': {
-                'qwen3-coder-30-a3b-8gb': 'qwen3-coder.service',
-                'qwen3-thinking-30-a3b-8gb': 'qwen3-thinking.service',
-                'qwen3-coder-80-a3b-8gb': 'qwen3-coder-max.service',
-                'qwen3-thinking-80-a3b-8gb': 'qwen3-thinking-max.service',
-                'bge-m3': 'bge-embedding.service'
+                'qwen3-coder-flash': 'qwen3-coder-flash.service',
+                'qwen3-coder-next': 'qwen3-coder-next.service',
+                'qwen3-thinking': 'qwen3-thinking.service',
+                'bge-m3': 'bge-m3.service'
             }
         }
         main.MODELS = main.CONFIG['models']
@@ -43,7 +42,7 @@ class TestModelProxy(unittest.TestCase):
         main.ChatProxy._current_active_model = None
         main.web.ctx.status = "200 OK"
         main.web._test_data = json.dumps({
-            "model": "qwen3-coder-30-a3b-8gb",
+            "model": "qwen3-coder-flash",
             "messages": [{"role": "user", "content": "Hi"}],
             "stream": False
         })
@@ -66,8 +65,10 @@ class TestModelProxy(unittest.TestCase):
         mock_get.return_value = MagicMock(status_code=200)
 
         mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response_data = {"choices": [{"message": {"content": "Python code"}}]}
+        mock_response.status_code = 200  # noqa: E501
+        mock_response_data = {
+            "choices": [{"message": {"content": "Python code"}}]
+        }
         mock_response.json.return_value = mock_response_data
         mock_response.content = json.dumps(mock_response_data).encode('utf-8')
         mock_post.return_value = mock_response
@@ -77,15 +78,18 @@ class TestModelProxy(unittest.TestCase):
         # content is a string if it's JSON-encoded result from json.dumps
         # or bytes if it's resp.content
         if isinstance(result, bytes):
-            self.assertIn(b"Python code", result)
+            self.assertIn(b"Python code", result)  # noqa: E501
         else:
             self.assertIn("Python code", result)
-        
+
         # Checking whether it stopped and started
-        calls = [str(c) for c in mock_run.call_args_list]
+        calls = [str(c) for c in mock_run.call_args_list]  # noqa: E501
         self.assertTrue(any("stop" in c for c in calls))
         self.assertTrue(
-            any("start" in c and "qwen3-coder.service" in c for c in calls)
+            any(
+                "start" in c and "qwen3-coder-flash.service" in c
+                for c in calls
+            )
         )
 
     @patch('main.subprocess.run')
@@ -95,7 +99,7 @@ class TestModelProxy(unittest.TestCase):
         """Test switching to the Thinking model and verification
         of the correct service."""
         main.web._test_data = json.dumps({
-            "model": "qwen3-thinking-30-a3b-8gb",
+            "model": "qwen3-thinking",
             "stream": False,
             "messages": []
         })
@@ -110,41 +114,47 @@ class TestModelProxy(unittest.TestCase):
         mock_post.return_value = mock_response
 
         proxy = main.ChatProxy()
-        proxy.POST()
+        proxy.POST()  # noqa: E501
 
         # Verification that the correct service
         # for the thinking model has been activated
         calls = [str(c) for c in mock_run.call_args_list]
         self.assertTrue(
-            any("start" in c and "qwen3-thinking.service" in c for c in calls)
-        )
+            any(
+                "start" in c and "qwen3-thinking.service" in c
+                for c in calls
+            )
+        )  # noqa: E501
 
     @patch('main.subprocess.run')
     @patch('main.requests.post')
     def test_streaming_disabled_always(self, mock_post, mock_run):
-        """Test that even when stream: True is requested, 
+        """Test that even when stream: True is requested,
         it is forced to False and returns a standard JSON response."""
         main.web._test_data = json.dumps({
-            "model": "qwen3-coder-30-a3b-8gb",
+            "model": "qwen3-coder-flash",  # noqa: E501
             "stream": True,
             "messages": []
         })
         # We simulate that the model is already running
         mock_run.return_value = MagicMock(stdout="active")
 
-        mock_response = MagicMock()
+        mock_response = MagicMock()  # noqa: E501
         mock_response.status_code = 200
-        mock_response_data = {"choices": [{"message": {"content": "Normal response"}}]}
+        mock_response_data = {
+            "choices": [{"message": {"content": "Normal response"}}]  # noqa: E501
+        }
         mock_response.json.return_value = mock_response_data
         mock_post.return_value = mock_response
 
         proxy = main.ChatProxy()
         result = proxy.POST()
 
-        # It should NOT be a generator, but a JSON string (since mock_web mocks it)
+        # It should NOT be a generator, but a JSON string
+        # (since mock_web mocks it)
         self.assertIsInstance(result, str)
         self.assertIn("Normal response", result)
-        
+
         # Verify that requests.post was called with stream=False
         args, kwargs = mock_post.call_args
         self.assertFalse(kwargs.get('stream'))
@@ -160,41 +170,41 @@ class TestModelProxy(unittest.TestCase):
         self.assertIn("Failed to activate model", result)
         self.assertEqual(main.web.ctx.status, "500 Internal Server Error")
 
-    @patch('main.subprocess.run')
+    @patch('main.subprocess.run')  # noqa: E266
     @patch('main.requests.post')
     @patch('main.requests.get')
     def test_json_repair(self, mock_get, mock_post, mock_run):
         """Test that malformed JSON in the response is repaired."""
         main.web._test_data = json.dumps({
-            "model": "qwen3-coder-30-a3b-8gb",
+            "model": "qwen3-coder-flash",
             "stream": False,
             "messages": []
         })
-        mock_run.return_value = MagicMock(stdout="active")
+        mock_run.return_value = MagicMock(stdout="active")  # noqa: E501
         mock_get.return_value = MagicMock(status_code=200)
 
         # Simulating malformed JSON in content
-        malformed_content = '{"key": "value", }' # Trailing comma
+        malformed_content = '{"key": "value", }'  # Trailing comma
         mock_response_data = {
             "choices": [{
                 "message": {
-                    "content": malformed_content
+                    "content": malformed_content  # noqa: E501
                 }
             }]
         }
-        
-        mock_response = MagicMock()
+
+        mock_response = MagicMock()  # noqa: E501
         mock_response.status_code = 200
         mock_response.json.return_value = mock_response_data
         mock_post.return_value = mock_response
 
         proxy = main.ChatProxy()
         result = proxy.POST()
-        
+
         # The result should be valid JSON now
         parsed_result = json.loads(result)
         repaired_content = parsed_result["choices"][0]["message"]["content"]
-        
+
         # json_repair should fix '{"key": "value", }' to '{"key": "value"}'
         self.assertIn('"key": "value"', repaired_content)
         self.assertNotIn(", }", repaired_content)
@@ -206,8 +216,10 @@ class TestModelProxy(unittest.TestCase):
         data = json.loads(result)
 
         model_ids = [m["id"] for m in data["data"]]
-        self.assertIn("qwen3-coder-30-a3b-8gb", model_ids)
-        self.assertIn("qwen3-thinking-30-a3b-8gb", model_ids)
+        self.assertIn("qwen3-coder-flash", model_ids)
+        self.assertIn("qwen3-coder-next", model_ids)
+        self.assertIn("qwen3-thinking", model_ids)
+        self.assertIn("bge-m3", model_ids)
         self.assertEqual(data["object"], "list")
 
 

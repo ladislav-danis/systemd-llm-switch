@@ -185,13 +185,12 @@ class ChatProxy:
             else:
                 # Classic JSON response
                 web.header('Content-Type', 'application/json')
-                
                 try:
                     resp_data = resp.json()
-                    # If it's a chat completion, try to repair the content of the message
-                    if "choices" in resp_data and len(resp_data["choices"]) > 0:
+                    # If it's a chat completion, try to repair the content
+                    choices = resp_data.get("choices", [])
+                    if choices:
                         message = resp_data["choices"][0].get("message", {})
-                        
                         # 1. Repair main content if needed
                         content = message.get("content", "")
                         if content:
@@ -199,11 +198,14 @@ class ChatProxy:
                                 json.loads(content)
                             except json.JSONDecodeError:
                                 if "{" in content or "[" in content:
-                                    logging.info("Repairing malformed JSON in 'content'.")
+                                    logging.info("Repairing JSON in content")
                                     message["content"] = repair_json(content)
 
                         # 2. Repair tool_calls arguments if present
                         tool_calls = message.get("tool_calls", [])
+                        if tool_calls and not message.get("content"):
+                            message["content"] = None
+
                         for tool in tool_calls:
                             func = tool.get("function", {})
                             args = func.get("arguments", "")
@@ -211,12 +213,15 @@ class ChatProxy:
                                 try:
                                     json.loads(args)
                                 except json.JSONDecodeError:
-                                    logging.info(f"Repairing malformed JSON in tool '{func.get('name')}' arguments.")
+                                    tool_name = func.get("name", "unknown")
+                                    msg = "Repairing JSON in tool '%s' args"
+                                    logging.info("%s", msg, tool_name)
                                     func["arguments"] = repair_json(args)
-                    
                     return json.dumps(resp_data)
                 except Exception as e:
-                    logging.warning(f"Could not parse or repair backend response: {e}")
+                    logging.warning(
+                        "Could not parse or repair backend response: %s", e
+                    )
                     return resp.content
 
         except json.JSONDecodeError:
