@@ -164,12 +164,12 @@ class ChatProxy:
                 )
                 memory_block = (
                     f"\n\n[PERSISTENT MEMORY]\n{memories}\n\n"
-                    "INSTRUCTION: Use 'save_memory' tool to store ONLY NEW "
-                    "important facts about user preferences, hardware, or "
-                    "project rules. Always translate and store these facts "
-                    "in English language regardless of the input language. "
-                    "Do not save information that is already present in the "
-                    "memory block above. Be concise."
+                    "CRITICAL INSTRUCTION: ALWAYS translate and store new "
+                    "facts in ENGLISH language. Use 'save_memory' tool to "
+                    "store ONLY NEW important facts about user preferences, "
+                    "hardware, or project rules. Do not save information "
+                    "that is already present in the memory block above. "
+                    "Be concise."
                 )
                 if system_msg:
                     system_msg["content"] = \
