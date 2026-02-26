@@ -1,3 +1,14 @@
+# Agent Rules Standard (AGENTS.md)
+
+## 0. Project Overview
+
+**systemd-llm-switch** is a Python-based proxy server that dynamically switches between LLM models by managing systemd user services. It provides a `/v1/chat/completions` endpoint that routes requests to the appropriate model service based on the requested model name, using `systemctl --user` to start/stop model services as needed.
+
+- **Primary Framework:** web.py (synchronous, no async/await)
+- **Execution Mode:** Native host execution (no Docker/Podman)
+- **Service Management:** systemctl --user
+- **Streaming:** Python generators (`yield`) for response streaming
+
 ## 1. Python Style & Typing
 * **Style Guide:** Strictly adhere to **PEP 8**.
 * **Typing:** Use explicit **type hints** in all function and method signatures (e.g., `def scale(scalar: float, vector: list[float]) -> list[float]:`).
@@ -23,17 +34,18 @@
 * **Primary Framework:** Use **web.py**. 
 * **Concurrency:** Sequential model switching. Use threading.Lock to ensure only one model is handled at a time, preventing VRAM race conditions.
 * **Dependencies:** Use `requests` with `stream=True` for forwarding. Do not use `httpx` or other async libraries unless explicitly requested.
+* **Additional Dependencies:** `json-repair` for handling malformed JSON responses from LLMs.
 
 ## 6. Deployment & Structure
 * **Native Execution:** The project runs natively on the host OS to allow direct interaction with `systemctl --user`. Do NOT use Docker/Podman for deployment.
 * **Environment:** Use a local Python Virtual Environment (`.venv`) located in the root directory.
 * **Isolation:** All source code and user configuration (config.yaml) must reside in the src/systemd_llm_switch/ directory.
-* **Installation:** Provide a `setup.sh` or clear instructions in `README.md` for symlinking systemd unit files from `deploy/systemd/` to `~/.config/systemd/user/`.
+* **Installation:** Run `setup.sh` to enable linger, create the virtual environment, install dependencies, and symlink systemd unit files from `deploy/systemd/` to `~/.config/systemd/user/`.
 
 ## 7. Systemd (User Mode)
 * **Execution:** Always use `systemctl --user` for service management.
 * **Privileges:** No `sudo` is required. The script has native permission to manage its own user services.
-* **Linger:** Ensure `loginctl enable-linger $USER` is mentioned in docs to keep services running after logout.
+* **Linger:** Ensure `loginctl enable-linger $USER` is called during setup to keep services running after logout.
 
 ## 8. Streaming Implementation
 * Web.py does not use async/await. Streaming must be implemented using **Python generators** (`yield`) within the handler methods.
