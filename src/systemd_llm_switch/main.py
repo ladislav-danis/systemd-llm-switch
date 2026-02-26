@@ -146,6 +146,57 @@ class ChatProxy:
             data = json.loads(raw_body)
             target_model = data.get("model")
 
+            # --- Memory Injection ---
+            messages = data.get("messages", [])
+            memory_path = Path(__file__).parent / "memories.md"
+            memories = ""
+            if memory_path.exists():
+                try:
+                    memories = memory_path.read_text().strip()
+                except Exception as e:
+                    logging.error(f"Failed to read memories: {e}")
+
+            if memories:
+                # Find system message or create one
+                system_msg = next(
+                    (m for m in messages if m["role"] == "system"),
+                    None
+                )
+                memory_block = f"\n\n[PERSISTENT MEMORY]\n{memories}"
+                if system_msg:
+                    system_msg["content"] = \
+                        f"{system_msg['content']}{memory_block}"
+                else:
+                    messages.insert(0, {
+                        "role": "system",
+                        "content": f"You are a helpful assistant.{memory_block}"
+                    })
+
+            # --- Virtual Tool Injection (save_memory) ---
+            if "tools" not in data:
+                data["tools"] = []
+            
+            # Check if save_memory is already there
+            if not any(t.get("function", {}).get("name") == "save_memory" 
+                       for t in data["tools"]):
+                data["tools"].append({
+                    "type": "function",
+                    "function": {
+                        "name": "save_memory",
+                        "description": "Saves a new fact into persistent memory.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "fact": {
+                                    "type": "string",
+                                    "description": "Fact to remember"
+                                }
+                            },
+                            "required": ["fact"]
+                        }
+                    }
+                })
+
             logging.info(f"Model request accepted: {target_model}")
 
             # Force stream=False to ensure we can repair JSON in the response
@@ -201,6 +252,20 @@ class ChatProxy:
                         for tool in tool_calls:
                             func = tool.get("function", {})
                             args = func.get("arguments", "")
+
+                            # --- Handle Virtual Tool: save_memory ---
+                            if func.get("name") == "save_memory" and args:
+                                try:
+                                    # Try to repair/parse the fact arguments
+                                    parsed_args = json.loads(repair_json(args))
+                                    fact = parsed_args.get("fact")
+                                    if fact:
+                                        with open(memory_path, "a") as f:
+                                            f.write(f"- {fact}\n")
+                                        logging.info(f"MEMORY SAVED: {fact}")
+                                except Exception as e:
+                                    logging.error(f"Failed to save memory: {e}")
+
                             if args:
                                 try:
                                     json.loads(args)
