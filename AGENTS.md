@@ -1,5 +1,7 @@
 # Agent Rules Standard (AGENTS.md)
 
+IMPORTANT - use .venv in the root folder of the project
+
 ## 0. Project Overview
 
 **systemd-llm-switch** is a Python-based proxy server that dynamically switches between LLM models by managing systemd user services. It provides a `/v1/chat/completions` endpoint that routes requests to the appropriate model service based on the requested model name, using `systemctl --user` to start/stop model services as needed.
