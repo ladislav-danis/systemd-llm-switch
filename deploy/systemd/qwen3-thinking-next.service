@@ -22,7 +22,7 @@ ExecStart={{LLAMA_SERVER_PATH}} \
 --jinja \
 --temp 0.6 --min-p 0.00 --top-p 0.95 --top-k 20 --repeat-penalty 1.0 --presence_penalty 1.0 \
 --flash-attn on \
--a qwen3-thinking-80-a3b-8gb \
+-a qwen3-thinking-next \
 --n-gpu-layers 49 \
 --override-tensor ".*blk\.([4-9]|[1-3][0-9]|4[0-8])\.ffn_.*_exps.*=CPU" \
 --host 0.0.0.0 \
