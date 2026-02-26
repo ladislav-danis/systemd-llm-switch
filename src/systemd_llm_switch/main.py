@@ -162,7 +162,13 @@ class ChatProxy:
                     (m for m in messages if m["role"] == "system"),
                     None
                 )
-                memory_block = f"\n\n[PERSISTENT MEMORY]\n{memories}"
+                memory_block = (
+                    f"\n\n[PERSISTENT MEMORY]\n{memories}\n\n"
+                    "INSTRUCTION: Use 'save_memory' tool to store ONLY NEW "
+                    "important facts about user preferences, hardware, or "
+                    "project rules. Do not save information that is already "
+                    "present in the memory block above. Be concise."
+                )
                 if system_msg:
                     system_msg["content"] = \
                         f"{system_msg['content']}{memory_block}"
