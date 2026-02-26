@@ -3,6 +3,7 @@ server:
   host: "0.0.0.0"  # Address at which the server listens
   port: 3002         # Port on which the server will run
   llama_url: "http://127.0.0.1:3004" # Address of the llama.cpp server backend
+  trace_log: "llm_trace.log"  # File to log detailed input/output for debugging
 
 # List of available models and their systemd services
 # Simply add a new model as an additional line.

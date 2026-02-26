@@ -261,6 +261,48 @@ class TestModelProxy(unittest.TestCase):
         self.assertIn("bge-m3", model_ids)
         self.assertEqual(data["object"], "list")
 
+    @patch('main.subprocess.run')
+    @patch('main.requests.post')
+    @patch('main.requests.get')
+    def test_trace_logging(self, mock_get, mock_post, mock_run):
+        """Test that trace logging correctly records input and output."""
+        from pathlib import Path
+        test_log = Path("test_trace_main.log")
+        if test_log.exists():
+            test_log.unlink()
+
+        main.TRACE_LOG_PATH = test_log
+        try:
+            # Test with extra whitespace to verify 1:1 preservation
+            raw_input_bytes = b' { "model": "qwen3-coder-flash" } '
+            main.web._test_data = raw_input_bytes
+            mock_run.return_value = MagicMock(stdout="active")
+            mock_get.return_value = MagicMock(status_code=200)
+
+            # Raw output with deliberate formatting
+            raw_output_bytes = b'{"choices": [{"message": {"arguments": "{\\"a\\": 1,}"}}]}'
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = json.loads(raw_output_bytes)
+            mock_response.content = raw_output_bytes
+            mock_post.return_value = mock_response
+
+            proxy = main.ChatProxy()
+            proxy.POST()
+
+            self.assertTrue(test_log.exists())
+            with open(test_log, 'r') as f:
+                content = f.read()
+                # Verify 1:1 input (including leading/trailing spaces)
+                self.assertIn("=== INPUT ===\n { \"model\": \"qwen3-coder-flash\" } ", content)
+                # Verify 1:1 output (exact bytes)
+                self.assertIn("=== RAW OUTPUT ===\n" + raw_output_bytes.decode(), content)
+                self.assertIn("=== FINAL OUTPUT ===", content)
+        finally:
+            if test_log.exists():
+                test_log.unlink()
+            main.TRACE_LOG_PATH = None
+
 
 if __name__ == '__main__':
     unittest.main()

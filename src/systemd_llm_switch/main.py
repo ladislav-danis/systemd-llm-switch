@@ -30,6 +30,7 @@ logging.basicConfig(
 CONFIG = {}
 MODELS = {}
 LLAMA_URL = ""
+TRACE_LOG_PATH = None
 
 
 def load_config(path: str = 'config.yaml'):
@@ -44,7 +45,7 @@ def load_config(path: str = 'config.yaml'):
     Raises:
         SystemExit: If configuration file is invalid or missing required sections.
     """
-    global CONFIG, MODELS, LLAMA_URL
+    global CONFIG, MODELS, LLAMA_URL, TRACE_LOG_PATH
     try:
         config_path = Path(__file__).parent / path
         with open(config_path, 'r') as f:
@@ -60,6 +61,9 @@ def load_config(path: str = 'config.yaml'):
         CONFIG = data
         MODELS = data['models']
         LLAMA_URL = data['server']['llama_url']
+        TRACE_LOG_PATH = data['server'].get('trace_log')
+        if TRACE_LOG_PATH:
+            TRACE_LOG_PATH = Path(__file__).parent / TRACE_LOG_PATH
 
         logging.info(f"Configuration loaded. Models: {list(MODELS.keys())}")
 
@@ -70,6 +74,46 @@ def load_config(path: str = 'config.yaml'):
 
 load_config()
 # -----------------------------------------------------------------------------
+
+
+def log_trace(input_raw, raw_output, final_output):
+    """Logs the interaction details to a trace file for debugging.
+
+    Args:
+        input_raw: The exact raw bytes/string received from the client.
+        raw_output: The exact raw bytes/string received from the backend.
+        final_output: The final response after repairs.
+    """
+    if not TRACE_LOG_PATH:
+        return
+
+    try:
+        with open(TRACE_LOG_PATH, 'a', encoding='utf-8') as f:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"--- TRACE {timestamp} ---\n")
+            
+            f.write("=== INPUT ===\n")
+            if isinstance(input_raw, bytes):
+                f.write(input_raw.decode('utf-8', errors='replace'))
+            else:
+                f.write(str(input_raw))
+            
+            f.write("\n\n=== RAW OUTPUT ===\n")
+            if isinstance(raw_output, bytes):
+                f.write(raw_output.decode('utf-8', errors='replace'))
+            else:
+                f.write(str(raw_output))
+                
+            f.write("\n\n=== FINAL OUTPUT ===\n")
+            if isinstance(final_output, (dict, list)):
+                f.write(json.dumps(final_output, indent=2, ensure_ascii=False))
+            elif isinstance(final_output, bytes):
+                f.write(final_output.decode('utf-8', errors='replace'))
+            else:
+                f.write(str(final_output))
+            f.write("\n" + "="*40 + "\n\n")
+    except Exception as e:
+        logging.error(f"Error writing to trace log: {e}")
 
 
 # Auxiliary function for calling systemctl --user
@@ -243,6 +287,7 @@ class ChatProxy:
             else:
                 # Classic JSON response
                 web.header('Content-Type', 'application/json')
+                raw_resp_content = resp.content
                 try:
                     resp_data = resp.json()
                     # If it's a chat completion, try to repair the content
@@ -269,11 +314,15 @@ class ChatProxy:
                                         tool_name
                                     )
                                     func["arguments"] = repair_json(args)
-                    return json.dumps(resp_data)
+                    
+                    final_output = json.dumps(resp_data)
+                    log_trace(raw_body, raw_resp_content, resp_data)
+                    return final_output
                 except Exception as e:
                     logging.warning(
                         "Could not parse or repair backend response: %s", e
                     )
+                    log_trace(raw_body, raw_resp_content, f"ERROR: {e}\nORIGINAL CONTENT: {raw_resp_content.decode('utf-8', errors='replace')}")
                     return resp.content
 
         except json.JSONDecodeError:
