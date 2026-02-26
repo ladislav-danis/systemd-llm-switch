@@ -33,7 +33,17 @@ LLAMA_URL = ""
 
 
 def load_config(path: str = 'config.yaml'):
-    """Loads the configuration and explicitly updates global variables."""
+    """Loads configuration from YAML file and initializes global variables.
+
+    Args:
+        path: Path to the configuration file relative to the script location.
+
+    Returns:
+        None. Updates global CONFIG, MODELS, and LLAMA_URL variables.
+
+    Raises:
+        SystemExit: If configuration file is invalid or missing required sections.
+    """
     global CONFIG, MODELS, LLAMA_URL
     try:
         config_path = Path(__file__).parent / path
@@ -67,7 +77,15 @@ def run_systemctl_user(
     action: str,
     service: str
 ) -> subprocess.CompletedProcess:
-    """Runs the systemctl --user command safely."""
+    """Executes a systemctl --user command for the specified service.
+
+    Args:
+        action: The action to perform (e.g., 'start', 'stop', 'is-active').
+        service: The service name to operate on.
+
+    Returns:
+        A CompletedProcess object containing the command execution results.
+    """
     command = ["/usr/bin/systemctl", "--user", action, service]
     return subprocess.run(command, capture_output=True, text=True)
 
@@ -80,11 +98,35 @@ urls = (
 
 
 class ChatProxy:
-    """Proxy for processing requests with dynamic model switching."""
+    """Proxy handler for processing LLM API requests with dynamic model switching.
+
+    Manages model activation through systemd services and forwards API requests
+    to the active llama.cpp backend. Uses threading locks to prevent VRAM
+    race conditions during model switching.
+
+    Attributes:
+        _lock: Threading lock to serialize model switching operations.
+        _current_active_model: Track currently active model name.
+    """
+
     _lock = threading.Lock()
     _current_active_model: Optional[str] = None
 
     def switch_model(self, target_model: str) -> bool:
+        """Switches to the specified model by starting its systemd service.
+
+        Stops all other models to free VRAM, then starts the target model
+        and verifies it's operational via health check.
+
+        Args:
+            target_model: The model identifier from config.yaml.
+
+        Returns:
+            True if model was successfully activated, False otherwise.
+
+        Raises:
+            None. Logs errors but does not propagate exceptions.
+        """
         target_service = MODELS.get(target_model)
         if not target_service:
             logging.error(
@@ -136,6 +178,22 @@ class ChatProxy:
             return False
 
     def POST(self):
+        """Processes incoming chat completions requests.
+
+        Switches to the requested model, forwards the request to the active
+        llama.cpp backend, and handles response formatting including JSON
+        repair for malformed tool call arguments.
+
+        Args:
+            None. Reads request data from web.ctx.
+
+        Returns:
+            JSON string or generator for the response body.
+
+        Raises:
+           web.ctx.status: Set to "400 Bad Request" for invalid JSON,
+                "500 Internal Server Error" for activation failures.
+        """
         try:
             # Reading JSON data from the request body
             raw_body = web.data()
