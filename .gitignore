@@ -1,4 +1,6 @@
 .aider*
 .gitignore
 .venv
-__pycache__src/systemd_llm_switch/memories.md
+__pycache__
+src/systemd_llm_switch/memories.md
+__pycache__/
