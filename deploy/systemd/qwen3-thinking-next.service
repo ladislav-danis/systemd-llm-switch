@@ -14,8 +14,8 @@ ExecStart={{LLAMA_SERVER_PATH}} \
 --model {{MODELS_DIR}}/unsloth_Qwen3-Next-80B-A3B-Thinking-GGUF_Qwen3-Next-80B-A3B-Thinking-UD-Q4_K_XL.gguf \
 --threads 3 \
 -np 1 \
---batch-size 1024 \
---ubatch-size 1024 \
+--batch-size 2048 \
+--ubatch-size 2048 \
 --ctx-size 65536 \
 --cache-type-k q8_0 \
 --cache-type-v q8_0 \
