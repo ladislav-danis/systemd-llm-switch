@@ -43,7 +43,8 @@ def load_config(path: str = 'config.yaml'):
         None. Updates global CONFIG, MODELS, and LLAMA_URL variables.
 
     Raises:
-        SystemExit: If configuration file is invalid or missing required sections.
+        SystemExit: If configuration file is invalid or missing required
+        sections.
     """
     global CONFIG, MODELS, LLAMA_URL, TRACE_LOG_PATH
     try:
@@ -142,7 +143,8 @@ urls = (
 
 
 class ChatProxy:
-    """Proxy handler for processing LLM API requests with dynamic model switching.
+    """Proxy handler for processing LLM API requests with dynamic model
+    switching.
 
     Manages model activation through systemd services and forwards API requests
     to the active llama.cpp backend. Uses threading locks to prevent VRAM
@@ -246,6 +248,9 @@ class ChatProxy:
                 return json.dumps({"error": "No data provided"})
 
             data = json.loads(raw_body)
+            # Force stream=False to ensure we can parse and repair the response
+            # regardless of client settings.
+            data["stream"] = False
             target_model = data.get("model")
 
             logging.info(f"Model request accepted: {target_model}")
@@ -295,7 +300,8 @@ class ChatProxy:
                     if choices:
                         message = resp_data["choices"][0].get("message", {})
 
-                        # 1. Ensure content is null if tool_calls present (standard OpenAI)
+                        # 1. Ensure content is null if tool_calls present
+                        #    (standard OpenAI)
                         tool_calls = message.get("tool_calls", [])
                         if tool_calls and not message.get("content"):
                             message["content"] = None
@@ -322,7 +328,12 @@ class ChatProxy:
                     logging.warning(
                         "Could not parse or repair backend response: %s", e
                     )
-                    log_trace(raw_body, raw_resp_content, f"ERROR: {e}\nORIGINAL CONTENT: {raw_resp_content.decode('utf-8', errors='replace')}")
+                    log_trace(
+                        raw_body,
+                        raw_resp_content,
+                        f"ERROR: {e}\nORIGINAL CONTENT: "
+                        f"{raw_resp_content.decode('utf-8', errors='replace')}",
+                    )
                     return resp.content
 
         except json.JSONDecodeError:
