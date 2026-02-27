@@ -51,3 +51,8 @@ IMPORTANT - use .venv in the root folder of the project
 
 ## 8. Streaming Implementation
 * Web.py does not use async/await. Streaming must be implemented using **Python generators** (`yield`) within the handler methods.
+
+## 9. Automated Style Fixes
+- **Minor Style Issues:** For simple linting errors like trailing whitespace (W291) or blank lines containing whitespace (W293), DO NOT use `apply_diff` or `replace`. Instead, use a single shell command to fix the entire file at once:
+  `sed -i 's/[[:space:]]*$//' <file_path>`
+- **Efficiency:** Prioritize automated CLI tools for bulk style corrections over manual line-by-line edits to avoid context exhaustion and editing conflicts.
