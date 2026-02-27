@@ -92,7 +92,6 @@ def log_trace(input_raw, raw_output, final_output):
         with open(TRACE_LOG_PATH, 'a', encoding='utf-8') as f:
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
             f.write(f"--- TRACE {timestamp} ---\n")
-            
             f.write("=== INPUT ===\n")
             if isinstance(input_raw, bytes):
                 f.write(input_raw.decode('utf-8', errors='replace'))
@@ -266,7 +265,8 @@ class ChatProxy:
                 )
 
             # Forwarding the request to the llama.cpp backend
-            # Always use stream=False here because we forced data["stream"] = False
+            # Always use stream=False here because we forced
+            # data["stream"] = False
             resp = requests.post(
                 f"{LLAMA_URL}/v1/chat/completions",
                 json=data,
@@ -317,16 +317,24 @@ class ChatProxy:
                         chunk_data = repaired_data.copy()
                         chunk_data["object"] = "chat.completion.chunk"
                         
-                        if "choices" in chunk_data and len(chunk_data["choices"]) > 0:
+                        if (
+                            "choices" in chunk_data
+                            and len(chunk_data["choices"]) > 0
+                        ):
                             choice = chunk_data["choices"][0]
                             if "message" in choice:
                                 choice["delta"] = choice.pop("message")
-                                # OpenAI stream format for tool_calls uses index
+                                # OpenAI stream format for tool_calls
+                                # uses index
                                 if "tool_calls" in choice["delta"]:
-                                    for i, tc in enumerate(choice["delta"]["tool_calls"]):
+                                    for i, tc in enumerate(
+                                        choice["delta"]["tool_calls"]
+                                    ):
                                         tc["index"] = i
 
-                        yield f"data: {json.dumps(chunk_data)}\n\n".encode('utf-8')
+                        yield (
+                            f"data: {json.dumps(chunk_data)}\n\n"
+                        ).encode('utf-8')
                         yield b"data: [DONE]\n\n"
 
                     return fake_stream(resp_data)
@@ -346,7 +354,6 @@ class ChatProxy:
                     f"{raw_resp_content.decode('utf-8', errors='replace')}",
                 )
                 return resp.content
-
 
         except json.JSONDecodeError:
             web.ctx.status = "400 Bad Request"
