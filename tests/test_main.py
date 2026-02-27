@@ -130,7 +130,7 @@ class TestModelProxy(unittest.TestCase):
     @patch('main.requests.post')
     def test_streaming_disabled_always(self, mock_post, mock_run):
         """Test that even when stream: True is requested,
-        it is forced to False and returns a standard JSON response."""
+        it fetches the full response to repair it, but returns a fake SSE stream to the client."""
         main.web._test_data = json.dumps({
             "model": "qwen3-coder-flash",  # noqa: E501
             "stream": True,
@@ -142,7 +142,7 @@ class TestModelProxy(unittest.TestCase):
         mock_response = MagicMock()  # noqa: E501
         mock_response.status_code = 200
         mock_response_data = {
-            "choices": [{"message": {"content": "Normal response"}}]  # noqa: E501
+            "choices": [{"message": {"content": "Normal response", "role": "assistant"}}]  # noqa: E501
         }
         mock_response.json.return_value = mock_response_data
         mock_post.return_value = mock_response
@@ -150,10 +150,16 @@ class TestModelProxy(unittest.TestCase):
         proxy = main.ChatProxy()
         result = proxy.POST()
 
-        # It should NOT be a generator, but a JSON string
-        # (since mock_web mocks it)
-        self.assertIsInstance(result, str)
-        self.assertIn("Normal response", result)
+        # It should return a generator for the fake stream
+        import types
+        self.assertIsInstance(result, types.GeneratorType)
+        
+        chunks = list(result)
+        self.assertEqual(len(chunks), 2)
+        self.assertTrue(chunks[0].startswith(b'data: {'))
+        self.assertIn(b'"object": "chat.completion.chunk"', chunks[0])
+        self.assertIn(b'"delta"', chunks[0])
+        self.assertEqual(chunks[1], b'data: [DONE]\n\n')
 
         # Verify that requests.post was called with stream=False
         args, kwargs = mock_post.call_args

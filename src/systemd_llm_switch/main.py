@@ -248,15 +248,15 @@ class ChatProxy:
                 return json.dumps({"error": "No data provided"})
 
             data = json.loads(raw_body)
+            # Check if the client requested streaming
+            client_wants_stream = data.get("stream", False)
+            
             # Force stream=False to ensure we can parse and repair the response
             # regardless of client settings.
             data["stream"] = False
             target_model = data.get("model")
 
             logging.info(f"Model request accepted: {target_model}")
-
-            # Force stream=False to ensure we can repair JSON in the response
-            is_stream = False
 
             # Attempt to switch models
             if not self.switch_model(target_model):
@@ -266,75 +266,87 @@ class ChatProxy:
                 )
 
             # Forwarding the request to the llama.cpp backend
+            # Always use stream=False here because we forced data["stream"] = False
             resp = requests.post(
                 f"{LLAMA_URL}/v1/chat/completions",
                 json=data,
-                stream=is_stream,
+                stream=False,
                 timeout=(10, 1800)
             )
 
-            if is_stream:
-                # Setting headers for SSE
-                web.header('Content-Type', 'text/event-stream')
-                web.header('Cache-Control', 'no-cache')
-                # web.header('Transfer-Encoding', 'chunked')
-                web.header('Connection', 'keep-alive')
-                # Important for Nginx/Proxy
-                web.header('X-Accel-Buffering', 'no')
+            raw_resp_content = resp.content
+            try:
+                resp_data = resp.json()
+                # If it's a chat completion, try to repair the content
+                choices = resp_data.get("choices", [])
+                if choices:
+                    message = resp_data["choices"][0].get("message", {})
 
-                def generate():
-                    for chunk in resp.iter_content(chunk_size=None):
-                        if chunk:
-                            yield chunk
+                    # 1. Ensure content is null if tool_calls present
+                    #    (standard OpenAI)
+                    tool_calls = message.get("tool_calls", [])
+                    if tool_calls and not message.get("content"):
+                        message["content"] = None
 
-                return generate()
+                    # 2. Repair tool_calls arguments if present
+                    for tool in tool_calls:
+                        func = tool.get("function", {})
+                        args = func.get("arguments", "")
+                        if args:
+                            try:
+                                json.loads(args)
+                            except json.JSONDecodeError:
+                                tool_name = func.get("name", "unknown")
+                                logging.info(
+                                    "Repairing JSON in tool '%s' args",
+                                    tool_name
+                                )
+                                func["arguments"] = repair_json(args)
+                
+                log_trace(raw_body, raw_resp_content, resp_data)
 
-            else:
-                # Classic JSON response
-                web.header('Content-Type', 'application/json')
-                raw_resp_content = resp.content
-                try:
-                    resp_data = resp.json()
-                    # If it's a chat completion, try to repair the content
-                    choices = resp_data.get("choices", [])
-                    if choices:
-                        message = resp_data["choices"][0].get("message", {})
+                if client_wants_stream:
+                    # Client requested a stream, so we must fake an SSE stream
+                    web.header('Content-Type', 'text/event-stream')
+                    web.header('Cache-Control', 'no-cache')
+                    web.header('Connection', 'keep-alive')
+                    web.header('X-Accel-Buffering', 'no')
 
-                        # 1. Ensure content is null if tool_calls present
-                        #    (standard OpenAI)
-                        tool_calls = message.get("tool_calls", [])
-                        if tool_calls and not message.get("content"):
-                            message["content"] = None
+                    def fake_stream(repaired_data):
+                        # Convert chat.completion to chat.completion.chunk
+                        chunk_data = repaired_data.copy()
+                        chunk_data["object"] = "chat.completion.chunk"
+                        
+                        if "choices" in chunk_data and len(chunk_data["choices"]) > 0:
+                            choice = chunk_data["choices"][0]
+                            if "message" in choice:
+                                choice["delta"] = choice.pop("message")
+                                # OpenAI stream format for tool_calls uses index
+                                if "tool_calls" in choice["delta"]:
+                                    for i, tc in enumerate(choice["delta"]["tool_calls"]):
+                                        tc["index"] = i
 
-                        # 2. Repair tool_calls arguments if present
-                        for tool in tool_calls:
-                            func = tool.get("function", {})
-                            args = func.get("arguments", "")
-                            if args:
-                                try:
-                                    json.loads(args)
-                                except json.JSONDecodeError:
-                                    tool_name = func.get("name", "unknown")
-                                    logging.info(
-                                        "Repairing JSON in tool '%s' args",
-                                        tool_name
-                                    )
-                                    func["arguments"] = repair_json(args)
+                        yield f"data: {json.dumps(chunk_data)}\n\n".encode('utf-8')
+                        yield b"data: [DONE]\n\n"
+
+                    return fake_stream(resp_data)
+                else:
+                    # Classic JSON response
+                    web.header('Content-Type', 'application/json')
+                    return json.dumps(resp_data)
                     
-                    final_output = json.dumps(resp_data)
-                    log_trace(raw_body, raw_resp_content, resp_data)
-                    return final_output
-                except Exception as e:
-                    logging.warning(
-                        "Could not parse or repair backend response: %s", e
-                    )
-                    log_trace(
-                        raw_body,
-                        raw_resp_content,
-                        f"ERROR: {e}\nORIGINAL CONTENT: "
-                        f"{raw_resp_content.decode('utf-8', errors='replace')}",
-                    )
-                    return resp.content
+            except Exception as e:
+                logging.warning(
+                    "Could not parse or repair backend response: %s", e
+                )
+                log_trace(
+                    raw_body,
+                    raw_resp_content,
+                    f"ERROR: {e}\nORIGINAL CONTENT: "
+                    f"{raw_resp_content.decode('utf-8', errors='replace')}",
+                )
+                return resp.content
+
 
         except json.JSONDecodeError:
             web.ctx.status = "400 Bad Request"
