@@ -14,9 +14,9 @@ ExecStart={{LLAMA_SERVER_PATH}} \
 --model {{MODELS_DIR}}/unsloth_Qwen3-Coder-Next-GGUF_Qwen3-Coder-Next-UD-Q4_K_XL.gguf \
 --threads 3 \
 -np 1 \
---batch-size 3584 \
---ubatch-size 3584 \
---ctx-size 65536 \
+--batch-size 4096 \
+--ubatch-size 4096 \
+--ctx-size 98304 \
 --cache-type-k q8_0 \
 --cache-type-v q8_0 \
 --jinja \
