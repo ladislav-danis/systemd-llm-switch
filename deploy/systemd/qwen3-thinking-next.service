@@ -16,7 +16,7 @@ ExecStart={{LLAMA_SERVER_PATH}} \
 -np 1 \
 --batch-size 4096 \
 --ubatch-size 4096 \
---ctx-size 98304 \
+--ctx-size 81920 \
 --cache-type-k q8_0 \
 --cache-type-v q8_0 \
 --jinja \
