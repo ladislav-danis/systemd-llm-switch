@@ -188,6 +188,12 @@ The proxy includes an integrated **JSON repair mechanism** using the [`json-repa
 *   **Tool call arguments repair**: Automatically repairs JSON in tool call function arguments to ensure clients receive valid structures.
 *   **Safe content handling**: The main message content is **never** modified by the repair logic, ensuring that code blocks, prose, and intentional formatting remain exactly as the model generated them.
 
+### 🔌 Advanced Tool Calling Support
+The proxy is optimized for advanced tool-calling workflows, especially with models like **Qwen3-Coder-Next**:
+*   **Parallel Tool Execution**: Supports multiple tool calls in a single model turn (e.g., asking for weather in two different cities simultaneously).
+*   **Multi-Tool Variety**: Capable of handling calls to different functions in parallel (e.g., `get_weather` and `get_time` together).
+*   **Stream Simulation**: Even though the backend uses non-streaming for repair reliability, the proxy fakes an OpenAI-compliant SSE stream for clients that require it, ensuring tool calls are delivered correctly.
+
 ### 🏛️ OpenAI Standard Compliance
 To ensure maximum compatibility with strict OpenAI-compatible clients (like Aider, Cursor, or Cline):
 *   **Null Content**: When a model initiates a `tool_calls` response, the `content` field is explicitly set to `null` instead of an empty string, adhering to the OpenAI API specification.
@@ -231,15 +237,23 @@ The project includes a test suite to verify correct setup:
 
 * **Unit Tests**: Run `./run_tests.sh` to execute the unit tests and verify the integrity of the Python code.
 * **Smoke Test**: Execute `python3 tests/test_smoke.py` to perform a real request to the proxy and verify the model starts and responds correctly.
+* **Real-Proxy Integration Tests**: Advanced tests that run against a live proxy instance to verify tool calling, parallel execution, and streaming behavior.
 
 ### Running Tests
 
 ```bash
-# Run all tests
+# Run all unit tests
 ./run_tests.sh
 
 # Run only the smoke test
 python3 tests/test_smoke.py
+
+# Run real-proxy integration tests (proxy must be running)
+# By default, it targets http://127.0.0.1:3002
+./.venv/bin/python3 -m unittest tests/test_integration_real_proxy.py -v
+
+# Custom proxy URL for integration tests:
+LLM_PROXY_URL=http://192.168.122.1:3002 ./.venv/bin/python3 -m unittest tests/test_integration_real_proxy.py -v
 ```
 
 The smoke test will:
