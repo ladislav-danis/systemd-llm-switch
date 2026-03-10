@@ -10,6 +10,7 @@ from types import ModuleType
 mock_web = ModuleType('web')
 mock_web.ctx = MagicMock()
 mock_web.header = MagicMock()
+mock_web.application = MagicMock()
 # Global storage for web.data() simulation
 mock_web._test_data = ""
 mock_web.data = lambda: mock_web._test_data

@@ -10,7 +10,10 @@ import logging
 from json_repair import repair_json
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from .db import Database
+try:
+    from .db import Database
+except ImportError:
+    from systemd_llm_switch.db import Database
 
 # --------------------
 # - Logging settings -
@@ -143,6 +146,23 @@ urls = (
     '/v1/responses', 'ResponsesHandler',
     '/v1/responses/([^/]+)', 'ResponsesDetailHandler'
 )
+
+
+def repair_tool_calls(tool_calls: List[Dict[str, Any]]):
+    """Utility to repair JSON in tool call arguments if they are malformed."""
+    for tool in tool_calls:
+        func = tool.get("function", {})
+        args = func.get("arguments", "")
+        if args:
+            try:
+                json.loads(args)
+            except json.JSONDecodeError:
+                tool_name = func.get("name", "unknown")
+                logging.info(
+                    "Repairing JSON in tool '%s' args",
+                    tool_name
+                )
+                func["arguments"] = repair_json(args)
 
 
 class ChatProxy:
@@ -294,19 +314,7 @@ class ChatProxy:
                         message["content"] = None
 
                     # 2. Repair tool_calls arguments if present
-                    for tool in tool_calls:
-                        func = tool.get("function", {})
-                        args = func.get("arguments", "")
-                        if args:
-                            try:
-                                json.loads(args)
-                            except json.JSONDecodeError:
-                                tool_name = func.get("name", "unknown")
-                                logging.info(
-                                    "Repairing JSON in tool '%s' args",
-                                    tool_name
-                                )
-                                func["arguments"] = repair_json(args)
+                    repair_tool_calls(tool_calls)
                 
                 log_trace(raw_body, raw_resp_content, resp_data)
 
@@ -396,6 +404,9 @@ class ResponsesHandler:
                 return json.dumps({"error": "No data provided"})
 
             data = json.loads(raw_body)
+            # Check if the client requested streaming
+            client_wants_stream = data.get("stream", False)
+            
             target_model = data.get("model")
             conversation_id = data.get("conversation_id")
             previous_response_id = data.get("previous_response_id")
@@ -462,7 +473,7 @@ class ResponsesHandler:
             backend_payload = {
                 "model": target_model,
                 "messages": history,
-                "stream": False
+                "stream": False  # Force stream=False for backend processing
             }
             if backend_tools:
                 backend_payload["tools"] = backend_tools
@@ -499,6 +510,7 @@ class ResponsesHandler:
                 
                 # Handle tool calls
                 tool_calls = message.get("tool_calls", [])
+                repair_tool_calls(tool_calls)
                 for tc in tool_calls:
                     func = tc.get("function", {})
                     db.add_item(
@@ -519,8 +531,35 @@ class ResponsesHandler:
 
             # 8. Return Response object
             final_response = db.get_response(response_id)
-            web.header('Content-Type', 'application/json')
-            return json.dumps(final_response)
+
+            if client_wants_stream:
+                # Simulace Responses API streamu
+                web.header('Content-Type', 'text/event-stream')
+                web.header('Cache-Control', 'no-cache')
+                web.header('Connection', 'keep-alive')
+                web.header('X-Accel-Buffering', 'no')
+
+                def response_stream(resp_obj):
+                    def sse(event, data_obj):
+                        return f"event: {event}\ndata: {json.dumps(data_obj)}\n\n".encode('utf-8')
+
+                    # Envelope: created
+                    yield sse("response.created", resp_obj)
+                    
+                    # Output items
+                    for item in resp_obj.get("output", []):
+                        yield sse("response.output_item.added", {"item": item})
+                        yield sse("response.output_item.done", {"item": item})
+                    
+                    # Final envelope: completed
+                    yield sse("response.completed", resp_obj)
+                    yield b"data: [DONE]\n\n"
+
+                return response_stream(final_response)
+            else:
+                # Classic JSON response
+                web.header('Content-Type', 'application/json')
+                return json.dumps(final_response)
 
         except Exception as e:
             logging.error(f"Error in ResponsesHandler: {e}", exc_info=True)
