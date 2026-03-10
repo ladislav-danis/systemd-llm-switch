@@ -1,0 +1,203 @@
+import sqlite3
+import json
+import time
+import uuid
+from pathlib import Path
+from typing import List, Dict, Optional, Any
+
+class Database:
+    def __init__(self, db_path: str = "llm_switch.db"):
+        self.db_path = Path(__file__).parent / db_path
+        self._init_db()
+
+    def _get_connection(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Conversations table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    created_at INTEGER,
+                    metadata TEXT
+                )
+            """)
+            # Responses table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS responses (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT,
+                    model TEXT,
+                    status TEXT,
+                    usage TEXT,
+                    created_at INTEGER,
+                    metadata TEXT,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                )
+            """)
+            # Items table (input/output)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS items (
+                    id TEXT PRIMARY KEY,
+                    response_id TEXT,
+                    conversation_id TEXT,
+                    type TEXT,
+                    role TEXT,
+                    content TEXT,
+                    created_at INTEGER,
+                    FOREIGN KEY (response_id) REFERENCES responses(id),
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                )
+            """)
+            conn.commit()
+
+    def create_conversation(self, metadata: Dict = None) -> str:
+        conv_id = f"conv_{uuid.uuid4().hex[:12]}"
+        created_at = int(time.time())
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO conversations (id, created_at, metadata) VALUES (?, ?, ?)",
+                (conv_id, created_at, json.dumps(metadata or {}))
+            )
+            conn.commit()
+        return conv_id
+
+    def create_response(
+        self, 
+        conversation_id: str, 
+        model: str, 
+        status: str = "in_progress",
+        metadata: Dict = None
+    ) -> str:
+        resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+        created_at = int(time.time())
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO responses (id, conversation_id, model, status, created_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (resp_id, conversation_id, model, status, created_at, json.dumps(metadata or {}))
+            )
+            conn.commit()
+        return resp_id
+
+    def update_response(self, resp_id: str, status: str, usage: Dict = None):
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE responses SET status = ?, usage = ? WHERE id = ?",
+                (status, json.dumps(usage or {}), resp_id)
+            )
+            conn.commit()
+
+    def add_item(
+        self, 
+        conversation_id: str, 
+        response_id: Optional[str], 
+        item_type: str, 
+        role: str, 
+        content: Any
+    ) -> str:
+        item_id = f"item_{uuid.uuid4().hex[:12]}"
+        created_at = int(time.time())
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO items (id, response_id, conversation_id, type, role, content, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (item_id, response_id, conversation_id, item_type, role, json.dumps(content), created_at)
+            )
+            conn.commit()
+        return item_id
+
+    def get_conversation_history(self, conversation_id: str, up_to_response_id: Optional[str] = None) -> List[Dict]:
+        query = "SELECT type, role, content FROM items WHERE conversation_id = ?"
+        params = [conversation_id]
+        
+        if up_to_response_id:
+            # Get items created at or before the specified response
+            query += " AND created_at <= (SELECT created_at FROM responses WHERE id = ?)"
+            params.append(up_to_response_id)
+            
+        query += " ORDER BY created_at ASC"
+        
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            history = []
+            
+            for row in rows:
+                item_type = row['type']
+                content = json.loads(row['content'])
+                
+                if item_type == "message":
+                    history.append({
+                        "role": row['role'],
+                        "content": content.get("text") if isinstance(content, dict) else content
+                    })
+                elif item_type == "function_call":
+                    # Tool call from assistant
+                    # Check if last message was also an assistant message with tool_calls
+                    if history and history[-1]["role"] == "assistant" and "tool_calls" in history[-1]:
+                        history[-1]["tool_calls"].append({
+                            "id": content.get("call_id"),
+                            "type": "function",
+                            "function": {
+                                "name": content.get("name"),
+                                "arguments": content.get("arguments")
+                            }
+                        })
+                    else:
+                        history.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": content.get("call_id"),
+                                "type": "function",
+                                "function": {
+                                    "name": content.get("name"),
+                                    "arguments": content.get("arguments")
+                                }
+                            }]
+                        })
+                elif item_type == "tool":
+                    # Output from a tool
+                    history.append({
+                        "role": "tool",
+                        "tool_call_id": content.get("tool_call_id"),
+                        "content": content.get("content")
+                    })
+            
+            return history
+
+    def get_response(self, resp_id: str) -> Optional[Dict]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM responses WHERE id = ?", (resp_id,)).fetchone()
+            if not row:
+                return None
+            
+            # Fetch output items for this response
+            items_rows = conn.execute(
+                "SELECT * FROM items WHERE response_id = ?", 
+                (resp_id,)
+            ).fetchall()
+            
+            output_items = []
+            for ir in items_rows:
+                output_items.append({
+                    "id": ir['id'],
+                    "type": ir['type'],
+                    "role": ir['role'],
+                    "content": json.loads(ir['content'])
+                })
+
+            return {
+                "id": row['id'],
+                "object": "response",
+                "created_at": row['created_at'],
+                "model": row['model'],
+                "status": row['status'],
+                "conversation_id": row['conversation_id'],
+                "usage": json.loads(row['usage']) if row['usage'] else None,
+                "output": output_items
+            }

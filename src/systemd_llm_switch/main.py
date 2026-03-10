@@ -9,7 +9,8 @@ import sys
 import logging
 from json_repair import repair_json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
+from .db import Database
 
 # --------------------
 # - Logging settings -
@@ -31,6 +32,7 @@ CONFIG = {}
 MODELS = {}
 LLAMA_URL = ""
 TRACE_LOG_PATH = None
+db = Database()
 
 
 def load_config(path: str = 'config.yaml'):
@@ -137,7 +139,9 @@ def run_systemctl_user(
 # Routing definitions for web.py
 urls = (
     '/v1/chat/completions', 'ChatProxy',
-    '/v1/models', 'ListModels'
+    '/v1/models', 'ListModels',
+    '/v1/responses', 'ResponsesHandler',
+    '/v1/responses/([^/]+)', 'ResponsesDetailHandler'
 )
 
 
@@ -157,7 +161,8 @@ class ChatProxy:
     _lock = threading.Lock()
     _current_active_model: Optional[str] = None
 
-    def switch_model(self, target_model: str) -> bool:
+    @classmethod
+    def switch_model(cls, target_model: str) -> bool:
         """Switches to the specified model by starting its systemd service.
 
         Stops all other models to free VRAM, then starts the target model
@@ -180,16 +185,16 @@ class ChatProxy:
             )
             return False
 
-        with ChatProxy._lock:
+        with cls._lock:
             # 1. If we already have the model registered as active,
             # we do not take any action.
-            if ChatProxy._current_active_model == target_model:
+            if cls._current_active_model == target_model:
                 return True
 
             # 2. Checking the actual status of the service in the system
             status_result = run_systemctl_user("is-active", target_service)
             if status_result.stdout.strip() == "active":
-                ChatProxy._current_active_model = target_model
+                cls._current_active_model = target_model
                 return True
 
             # 3. Switching logic
@@ -209,7 +214,7 @@ class ChatProxy:
                     resp = requests.get(f"{LLAMA_URL}/health", timeout=1)
                     if resp.status_code == 200:
                         logging.info(f"The {target_model} model is ready.")
-                        ChatProxy._current_active_model = target_model
+                        cls._current_active_model = target_model
                         return True
                 except requests.exceptions.RequestException:
                     pass
@@ -258,7 +263,7 @@ class ChatProxy:
             logging.info(f"Model request accepted: {target_model}")
 
             # Attempt to switch models
-            if not self.switch_model(target_model):
+            if not ChatProxy.switch_model(target_model):
                 web.ctx.status = "500 Internal Server Error"
                 return json.dumps(
                     {"error": f"Failed to activate model {target_model}"}
@@ -380,6 +385,169 @@ class ListModels:
         return json.dumps({"object": "list", "data": models_list})
 
 
+class ResponsesHandler:
+    """Proxy handler for the stateful OpenAI Responses API."""
+    
+    def POST(self):
+        try:
+            raw_body = web.data()
+            if not raw_body:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "No data provided"})
+
+            data = json.loads(raw_body)
+            target_model = data.get("model")
+            conversation_id = data.get("conversation_id")
+            previous_response_id = data.get("previous_response_id")
+            input_items = data.get("input", [])
+
+            if not target_model:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "Model is required"})
+
+            # Ensure model is switched (VRAM management)
+            if not ChatProxy.switch_model(target_model):
+                web.ctx.status = "500 Internal Server Error"
+                return json.dumps(
+                    {"error": f"Failed to activate model {target_model}"}
+                )
+
+            # 1. State Management: Create or retrieve conversation
+            if not conversation_id:
+                conversation_id = db.create_conversation()
+            
+            # 2. Add input items to SQLite and prepare for backend
+            for item in input_items:
+                item_type = item.get("type")
+                if item_type == "input_text":
+                    db.add_item(
+                        conversation_id, 
+                        None, 
+                        "message", 
+                        "user", 
+                        {"text": item.get("text")}
+                    )
+                elif item_type == "function_call_output":
+                    db.add_item(
+                        conversation_id,
+                        None,
+                        "tool",
+                        "tool",
+                        {
+                            "tool_call_id": item.get("call_id"),
+                            "content": item.get("output")
+                        }
+                    )
+
+            # 3. Reconstruct history for the backend
+            history = db.get_conversation_history(
+                conversation_id, 
+                up_to_response_id=previous_response_id
+            )
+
+            # 4. Prepare backend request (Chat Completions)
+            # Flatten tool definitions if present
+            backend_tools = []
+            for tool in data.get("tools", []):
+                if tool.get("type") == "function":
+                    backend_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": tool.get("name"),
+                            "description": tool.get("description", ""),
+                            "parameters": tool.get("parameters", {})
+                        }
+                    })
+
+            backend_payload = {
+                "model": target_model,
+                "messages": history,
+                "stream": False
+            }
+            if backend_tools:
+                backend_payload["tools"] = backend_tools
+
+            # 5. Call backend
+            resp = requests.post(
+                f"{LLAMA_URL}/v1/chat/completions",
+                json=backend_payload,
+                timeout=(10, 1800)
+            )
+            
+            if resp.status_code != 200:
+                web.ctx.status = f"{resp.status_code} {resp.reason}"
+                return resp.content
+
+            resp_data = resp.json()
+            
+            # 6. Create Response object and store output items
+            response_id = db.create_response(conversation_id, target_model)
+            
+            if "choices" in resp_data and len(resp_data["choices"]) > 0:
+                message = resp_data["choices"][0].get("message", {})
+                
+                # Handle text content
+                assistant_content = message.get("content")
+                if assistant_content:
+                    db.add_item(
+                        conversation_id, 
+                        response_id, 
+                        "message", 
+                        "assistant", 
+                        {"text": assistant_content}
+                    )
+                
+                # Handle tool calls
+                tool_calls = message.get("tool_calls", [])
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    db.add_item(
+                        conversation_id,
+                        response_id,
+                        "function_call",
+                        "assistant",
+                        {
+                            "call_id": tc.get("id"),
+                            "name": func.get("name"),
+                            "arguments": func.get("arguments")
+                        }
+                    )
+
+            # 7. Finalize response object in DB
+            usage = resp_data.get("usage", {})
+            db.update_response(response_id, "completed", usage=usage)
+
+            # 8. Return Response object
+            final_response = db.get_response(response_id)
+            web.header('Content-Type', 'application/json')
+            return json.dumps(final_response)
+
+        except Exception as e:
+            logging.error(f"Error in ResponsesHandler: {e}", exc_info=True)
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class ResponsesDetailHandler:
+    """Handler for retrieving details of a specific response."""
+    
+    def GET(self, response_id):
+        try:
+            response_obj = db.get_response(response_id)
+            if not response_obj:
+                web.ctx.status = "404 Not Found"
+                return json.dumps({"error": "Response not found"})
+            
+            web.header('Content-Type', 'application/json')
+            return json.dumps(response_obj)
+        except Exception as e:
+            logging.error(f"Error in ResponsesDetailHandler: {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+app = web.application(urls, globals())
+
 if __name__ == "__main__":
     # 1. Setting global variables from the configuration
     server_port = CONFIG['server']['port']
@@ -389,7 +557,6 @@ if __name__ == "__main__":
     # Add the host and port from the configuration to the arguments for web.py
     sys.argv.append(f'{server_host}:{server_port}')
 
-    app = web.application(urls, globals())
     logging.info(
         f"The proxy server runs on http://{server_host}:{server_port}"
     )
