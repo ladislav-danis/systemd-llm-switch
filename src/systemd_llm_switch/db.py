@@ -36,6 +36,7 @@ class Database:
                     usage TEXT,
                     created_at INTEGER,
                     metadata TEXT,
+                    instructions TEXT,
                     FOREIGN KEY (conversation_id) REFERENCES conversations(id)
                 )
             """)
@@ -71,25 +72,32 @@ class Database:
         conversation_id: str, 
         model: str, 
         status: str = "in_progress",
-        metadata: Dict = None
+        metadata: Dict = None,
+        instructions: str = None
     ) -> str:
         resp_id = f"resp_{uuid.uuid4().hex[:12]}"
         created_at = int(time.time())
         with self._get_connection() as conn:
             conn.execute(
-                "INSERT INTO responses (id, conversation_id, model, status, created_at, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (resp_id, conversation_id, model, status, created_at, json.dumps(metadata or {}))
+                "INSERT INTO responses (id, conversation_id, model, status, created_at, metadata, instructions) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (resp_id, conversation_id, model, status, created_at, json.dumps(metadata or {}), instructions)
             )
             conn.commit()
         return resp_id
 
-    def update_response(self, resp_id: str, status: str, usage: Dict = None):
+    def update_response(self, resp_id: str, status: str, usage: Dict = None, metadata: Dict = None):
         with self._get_connection() as conn:
-            conn.execute(
-                "UPDATE responses SET status = ?, usage = ? WHERE id = ?",
-                (status, json.dumps(usage or {}), resp_id)
-            )
+            if metadata is not None:
+                conn.execute(
+                    "UPDATE responses SET status = ?, usage = ?, metadata = ? WHERE id = ?",
+                    (status, json.dumps(usage or {}), json.dumps(metadata), resp_id)
+                )
+            else:
+                conn.execute(
+                    "UPDATE responses SET status = ?, usage = ? WHERE id = ?",
+                    (status, json.dumps(usage or {}), resp_id)
+                )
             conn.commit()
 
     def add_item(
@@ -176,20 +184,7 @@ class Database:
             if not row:
                 return None
             
-            # Fetch output items for this response
-            items_rows = conn.execute(
-                "SELECT * FROM items WHERE response_id = ?", 
-                (resp_id,)
-            ).fetchall()
-            
-            output_items = []
-            for ir in items_rows:
-                output_items.append({
-                    "id": ir['id'],
-                    "type": ir['type'],
-                    "role": ir['role'],
-                    "content": json.loads(ir['content'])
-                })
+            output_items = self.get_response_items(resp_id)
 
             return {
                 "id": row['id'],
@@ -199,5 +194,44 @@ class Database:
                 "status": row['status'],
                 "conversation_id": row['conversation_id'],
                 "usage": json.loads(row['usage']) if row['usage'] else None,
-                "output": output_items
+                "output": output_items,
+                "metadata": json.loads(row['metadata']) if row['metadata'] else {},
+                "instructions": row['instructions']
             }
+
+    def get_response_items(self, resp_id: str) -> List[Dict]:
+        with self._get_connection() as conn:
+            items_rows = conn.execute(
+                "SELECT * FROM items WHERE response_id = ?", 
+                (resp_id,)
+            ).fetchall()
+            
+            output_items = []
+            for ir in items_rows:
+                item_type = ir['type']
+                content_raw = json.loads(ir['content'])
+                
+                item = {
+                    "id": ir['id'],
+                    "object": "item",
+                    "type": item_type,
+                    "status": "completed",
+                    "created_at": ir['created_at']
+                }
+
+                if item_type == "message":
+                    item["role"] = ir['role']
+                    item["content"] = [
+                        {
+                            "type": "output_text",
+                            "text": content_raw.get("text") if isinstance(content_raw, dict) else content_raw,
+                            "annotations": []
+                        }
+                    ]
+                elif item_type == "function_call":
+                    item["call_id"] = content_raw.get("call_id")
+                    item["name"] = content_raw.get("name")
+                    item["arguments"] = content_raw.get("arguments")
+                
+                output_items.append(item)
+            return output_items

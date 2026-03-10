@@ -144,7 +144,9 @@ urls = (
     '/v1/chat/completions', 'ChatProxy',
     '/v1/models', 'ListModels',
     '/v1/responses', 'ResponsesHandler',
-    '/v1/responses/([^/]+)', 'ResponsesDetailHandler'
+    '/v1/responses/([^/]+)', 'ResponsesDetailHandler',
+    '/v1/responses/([^/]+)/items', 'ResponsesItemsHandler',
+    '/v1/responses/([^/]+)/cancel', 'ResponsesCancelHandler'
 )
 
 
@@ -411,6 +413,8 @@ class ResponsesHandler:
             conversation_id = data.get("conversation_id")
             previous_response_id = data.get("previous_response_id")
             input_items = data.get("input", [])
+            instructions = data.get("instructions")
+            metadata = data.get("metadata", {})
 
             if not target_model:
                 web.ctx.status = "400 Bad Request"
@@ -455,6 +459,10 @@ class ResponsesHandler:
                 conversation_id, 
                 up_to_response_id=previous_response_id
             )
+            
+            # Add instructions as system message if present
+            if instructions:
+                history.insert(0, {"role": "system", "content": instructions})
 
             # 4. Prepare backend request (Chat Completions)
             # Flatten tool definitions if present
@@ -492,7 +500,12 @@ class ResponsesHandler:
             resp_data = resp.json()
             
             # 6. Create Response object and store output items
-            response_id = db.create_response(conversation_id, target_model)
+            response_id = db.create_response(
+                conversation_id, 
+                target_model, 
+                instructions=instructions,
+                metadata=metadata
+            )
             
             if "choices" in resp_data and len(resp_data["choices"]) > 0:
                 message = resp_data["choices"][0].get("message", {})
@@ -527,7 +540,12 @@ class ResponsesHandler:
 
             # 7. Finalize response object in DB
             usage = resp_data.get("usage", {})
-            db.update_response(response_id, "completed", usage=usage)
+            db.update_response(
+                response_id, 
+                "completed", 
+                usage=usage,
+                metadata=metadata
+            )
 
             # 8. Return Response object
             final_response = db.get_response(response_id)
@@ -581,6 +599,44 @@ class ResponsesDetailHandler:
             return json.dumps(response_obj)
         except Exception as e:
             logging.error(f"Error in ResponsesDetailHandler: {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class ResponsesItemsHandler:
+    """Handler for listing items of a specific response."""
+    
+    def GET(self, response_id):
+        try:
+            items = db.get_response_items(response_id)
+            web.header('Content-Type', 'application/json')
+            return json.dumps({
+                "object": "list",
+                "data": items,
+                "has_more": False
+            })
+        except Exception as e:
+            logging.error(f"Error in ResponsesItemsHandler: {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class ResponsesCancelHandler:
+    """Handler for canceling a specific response."""
+    
+    def POST(self, response_id):
+        try:
+            # Since we process synchronously, it's either already done or doesn't exist
+            response_obj = db.get_response(response_id)
+            if not response_obj:
+                web.ctx.status = "404 Not Found"
+                return json.dumps({"error": "Response not found"})
+            
+            # Return current state (likely 'completed')
+            web.header('Content-Type', 'application/json')
+            return json.dumps(response_obj)
+        except Exception as e:
+            logging.error(f"Error in ResponsesCancelHandler: {e}")
             web.ctx.status = "500 Internal Server Error"
             return json.dumps({"error": str(e)})
 
