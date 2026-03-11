@@ -444,33 +444,48 @@ class ResponsesHandler:
                 conversation_id = db.create_conversation()
             
             # 2. Add input items to SQLite and prepare for backend
+            current_messages = []
             for item in input_items:
                 item_type = item.get("type")
                 if item_type == "input_text":
+                    text_content = item.get("text")
                     db.add_item(
                         conversation_id, 
                         None, 
                         "message", 
                         "user", 
-                        {"text": item.get("text")}
+                        {"text": text_content}
                     )
+                    current_messages.append({"role": "user", "content": text_content})
                 elif item_type == "function_call_output":
+                    call_id = item.get("call_id")
+                    output = item.get("output")
                     db.add_item(
                         conversation_id,
                         None,
                         "tool",
                         "tool",
                         {
-                            "tool_call_id": item.get("call_id"),
-                            "content": item.get("output")
+                            "tool_call_id": call_id,
+                            "content": output
                         }
                     )
+                    current_messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": output
+                    })
 
             # 3. Reconstruct history for the backend
             history = db.get_conversation_history(
                 conversation_id, 
                 up_to_response_id=previous_response_id
             )
+            
+            # If we are branching, the fetched history ends at previous_response_id.
+            # We must append the CURRENT messages that we just added to the DB.
+            if previous_response_id:
+                history.extend(current_messages)
             
             # Add instructions as system message if present
             if instructions:
