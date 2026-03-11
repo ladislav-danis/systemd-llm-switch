@@ -287,3 +287,66 @@ class Database:
             cursor = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             conn.commit()
             return cursor.rowcount > 0
+
+    def get_item(self, item_id: str) -> Optional[Dict]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+            if not row:
+                return None
+            
+            content_raw = json.loads(row['content'])
+            item = {
+                "id": row['id'],
+                "object": "item",
+                "type": row['type'],
+                "status": "completed",
+                "created_at": row['created_at']
+            }
+
+            if row['type'] == "message":
+                item["role"] = row['role']
+                item["content"] = [
+                    {
+                        "type": "output_text",
+                        "text": content_raw.get("text") if isinstance(content_raw, dict) else content_raw,
+                        "annotations": []
+                    }
+                ]
+            elif row['type'] == "function_call":
+                item["call_id"] = content_raw.get("call_id")
+                item["name"] = content_raw.get("name")
+                item["arguments"] = content_raw.get("arguments")
+            elif row['type'] == "tool":
+                item["tool_call_id"] = content_raw.get("tool_call_id")
+                item["output"] = content_raw.get("content")
+            
+            return item
+
+    def delete_item(self, item_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_conversation_items(
+        self, 
+        conversation_id: str, 
+        limit: int = 20, 
+        after: Optional[str] = None, 
+        order: str = "desc"
+    ) -> List[Dict]:
+        query = "SELECT id FROM items WHERE conversation_id = ?"
+        params = [conversation_id]
+        
+        if after:
+            # Simple cursor-based pagination
+            op = "<" if order.lower() == "desc" else ">"
+            query += f" AND created_at {op} (SELECT created_at FROM items WHERE id = ?)"
+            params.append(after)
+            
+        query += f" ORDER BY created_at {order.upper()} LIMIT ?"
+        params.append(limit)
+        
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self.get_item(row['id']) for row in rows]

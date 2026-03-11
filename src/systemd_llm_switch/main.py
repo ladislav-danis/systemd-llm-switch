@@ -159,6 +159,8 @@ urls = (
     '/v1/embeddings', 'EmbeddingsProxy',
     '/v1/models', 'ListModels',
     '/v1/conversations', 'ConversationsHandler',
+    '/v1/conversations/([^/]+)/items', 'ConversationItemsHandler',
+    '/v1/conversations/([^/]+)/items/([^/]+)', 'ConversationItemDetailHandler',
     '/v1/conversations/([^/]+)', 'ConversationsDetailHandler',
     '/v1/responses', 'ResponsesHandler',
     '/v1/responses/input_tokens', 'ResponsesInputTokensHandler',
@@ -575,6 +577,100 @@ class ConversationsDetailHandler:
                 return json.dumps({"error": "Conversation not found"})
         except Exception as e:
             logging.error(f"Error in ConversationsDetailHandler (DELETE): {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class ConversationItemsHandler:
+    """Handler for listing or creating items within a conversation."""
+    
+    def GET(self, conversation_id):
+        try:
+            params = web.input(limit=20, after=None, order="desc")
+            limit = int(params.limit)
+            after = params.after
+            order = params.order
+            
+            items = db.get_conversation_items(conversation_id, limit=limit, after=after, order=order)
+            
+            web.header('Content-Type', 'application/json')
+            return json.dumps({
+                "object": "list",
+                "data": items,
+                "has_more": len(items) == limit
+            })
+        except Exception as e:
+            logging.error(f"Error in ConversationItemsHandler (GET): {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+    def POST(self, conversation_id):
+        """Add items to a conversation."""
+        try:
+            raw_body = web.data()
+            if not raw_body:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "No data provided"})
+            
+            data = json.loads(raw_body)
+            items_to_add = data.get("items", [])
+            
+            # Verify conversation exists
+            if not db.get_conversation(conversation_id):
+                web.ctx.status = "404 Not Found"
+                return json.dumps({"error": "Conversation not found"})
+            
+            added_items = []
+            for item_data in items_to_add:
+                item_type = item_data.get("type")
+                if item_type == "message":
+                    role = item_data.get("role", "user")
+                    content = item_data.get("content")
+                    item_id = db.add_item(conversation_id, None, "message", role, content)
+                    added_items.append(db.get_item(item_id))
+                # Add other types if needed (function_call, etc.)
+            
+            web.header('Content-Type', 'application/json')
+            return json.dumps({
+                "object": "list",
+                "data": added_items,
+                "has_more": False
+            })
+        except Exception as e:
+            logging.error(f"Error in ConversationItemsHandler (POST): {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class ConversationItemDetailHandler:
+    """Handler for retrieving or deleting a specific conversation item."""
+    
+    def GET(self, conversation_id, item_id):
+        try:
+            item = db.get_item(item_id)
+            if not item:
+                web.ctx.status = "404 Not Found"
+                return json.dumps({"error": "Item not found"})
+            
+            web.header('Content-Type', 'application/json')
+            return json.dumps(item)
+        except Exception as e:
+            logging.error(f"Error in ConversationItemDetailHandler (GET): {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+    def DELETE(self, conversation_id, item_id):
+        try:
+            if db.delete_item(item_id):
+                # Return the parent conversation object as per spec
+                conv_obj = db.get_conversation(conversation_id)
+                web.header('Content-Type', 'application/json')
+                return json.dumps(conv_obj)
+            else:
+                web.ctx.status = "404 Not Found"
+                return json.dumps({"error": "Item not found"})
+        except Exception as e:
+            logging.error(f"Error in ConversationItemDetailHandler (DELETE): {e}")
             web.ctx.status = "500 Internal Server Error"
             return json.dumps({"error": str(e)})
 
