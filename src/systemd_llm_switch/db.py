@@ -120,15 +120,29 @@ class Database:
         return item_id
 
     def get_conversation_history(self, conversation_id: str, up_to_response_id: Optional[str] = None) -> List[Dict]:
-        query = "SELECT type, role, content FROM items WHERE conversation_id = ?"
-        params = [conversation_id]
-        
         if up_to_response_id:
-            # Get items created at or before the specified response
-            query += " AND created_at <= (SELECT created_at FROM responses WHERE id = ?)"
-            params.append(up_to_response_id)
-            
-        query += " ORDER BY created_at ASC"
+            # More precise filtering: get items that either:
+            # 1. Belong to a response that was created at or before the target response
+            # 2. Are input items (response_id IS NULL) created before the target response
+            query = """
+                SELECT type, role, content FROM items 
+                WHERE conversation_id = ? 
+                AND (
+                    (response_id IS NOT NULL AND response_id IN (
+                        SELECT id FROM responses WHERE conversation_id = ? 
+                        AND created_at <= (SELECT created_at FROM responses WHERE id = ?)
+                    ))
+                    OR 
+                    (response_id IS NULL AND created_at < (
+                        SELECT created_at FROM responses WHERE id = ?
+                    ))
+                )
+                ORDER BY created_at ASC
+            """
+            params = [conversation_id, conversation_id, up_to_response_id, up_to_response_id]
+        else:
+            query = "SELECT type, role, content FROM items WHERE conversation_id = ? ORDER BY created_at ASC"
+            params = [conversation_id]
         
         with self._get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
