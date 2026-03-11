@@ -520,6 +520,23 @@ class ResponsesHandler:
                         "tool_call_id": call_id,
                         "content": output
                     })
+                elif item_type == "compaction":
+                    # Handle compaction items by injecting their content into the history
+                    content = item.get("encrypted_content", "")
+                    # We store the summary directly or base64 encoded.
+                    # For now, let's assume it's plain text or base64.
+                    import base64
+                    try:
+                        summary = base64.b64decode(content).decode('utf-8')
+                    except Exception:
+                        summary = content
+                    
+                    # We don't save compaction items to SQLite items table as regular messages
+                    # to avoid cluttering, but we include them in the history sent to backend.
+                    current_messages.append({
+                        "role": "system", 
+                        "content": f"Previous conversation summary: {summary}"
+                    })
 
             # 3. Reconstruct history for the backend
             history = db.get_conversation_history(
@@ -700,13 +717,77 @@ class ResponsesCompactHandler:
                 return json.dumps({"error": "No data provided"})
 
             data = json.loads(raw_body)
-            conversation_id = data.get("conversation_id")
+            target_model = data.get("model")
+            input_items = data.get("input", [])
             
-            if not conversation_id:
+            if not target_model:
                 web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "conversation_id is required"})
+                return json.dumps({"error": "model is required"})
 
-            result = db.compact_conversation(conversation_id)
+            # Attempt to switch models
+            if not ChatProxy.switch_model(target_model):
+                web.ctx.status = "500 Internal Server Error"
+                return json.dumps(
+                    {"error": f"Failed to activate model {target_model}"}
+                )
+
+            # Extract text from input items to summarize
+            full_text = ""
+            for item in input_items:
+                if isinstance(item, str):
+                    full_text += item + "\n"
+                elif isinstance(item, dict):
+                    if item.get("type") == "input_text":
+                        full_text += f"User: {item.get('text')}\n"
+                    elif item.get("role") == "assistant":
+                        # Standard message items
+                        content = item.get("content", [])
+                        if isinstance(content, list):
+                            for c in content:
+                                if c.get("type") == "output_text":
+                                    full_text += f"Assistant: {c.get('text')}\n"
+                        elif isinstance(content, str):
+                            full_text += f"Assistant: {content}\n"
+
+            # Call backend to summarize
+            summary_prompt = f"Summarize the following conversation concisely for future context:\n\n{full_text}"
+            backend_payload = {
+                "model": target_model,
+                "messages": [{"role": "user", "content": summary_prompt}],
+                "stream": False
+            }
+
+            resp = requests.post(
+                f"{LLAMA_URL}/v1/chat/completions",
+                json=backend_payload,
+                timeout=(10, 600)
+            )
+            
+            if resp.status_code != 200:
+                web.ctx.status = f"{resp.status_code} {resp.reason}"
+                return resp.content
+
+            summary = resp.json()["choices"][0]["message"]["content"]
+            
+            # OpenAI uses base64 for encrypted_content
+            import base64
+            encoded_summary = base64.b64encode(summary.encode('utf-8')).decode('utf-8')
+
+            result = {
+                "id": f"resp_{uuid.uuid4().hex[:12]}",
+                "object": "response.compaction",
+                "created_at": int(time.time()),
+                "model": target_model,
+                "output": [
+                    {
+                        "id": f"cmp_{uuid.uuid4().hex[:12]}",
+                        "type": "compaction",
+                        "encrypted_content": encoded_summary
+                    }
+                ],
+                "usage": resp.json().get("usage", {})
+            }
+            
             web.header('Content-Type', 'application/json')
             return json.dumps(result)
         except Exception as e:

@@ -258,13 +258,3 @@ class Database:
             cursor = conn.execute("DELETE FROM responses WHERE id = ?", (resp_id,))
             conn.commit()
             return cursor.rowcount > 0
-
-    def compact_conversation(self, conversation_id: str) -> Dict:
-        # In a full implementation, this would summarize old messages.
-        # For now, we return a standard response indicating the operation is supported.
-        return {
-            "object": "conversation.compact",
-            "conversation_id": conversation_id,
-            "status": "completed",
-            "message": "Conversation compacted (simulated)"
-        }
