@@ -31,9 +31,8 @@ class TestModelProxy(unittest.TestCase):
                 'llama_url': 'http://localhost:3004'
             },
             'models': {
-                'qwen3-coder-flash': 'qwen3-coder-flash.service',
+                'qwen3.5-thinking': 'qwen3.5-thinking.service',
                 'qwen3-coder-next': 'qwen3-coder-next.service',
-                'qwen3-thinking': 'qwen3-thinking.service',
                 'bge-m3': 'bge-m3.service'
             }
         }
@@ -43,7 +42,7 @@ class TestModelProxy(unittest.TestCase):
         main.ChatProxy._current_active_model = None
         main.web.ctx.status = "200 OK"
         main.web._test_data = json.dumps({
-            "model": "qwen3-coder-flash",
+            "model": "qwen3-coder-next",
             "messages": [{"role": "user", "content": "Hi"}],
             "stream": False
         })
@@ -88,7 +87,7 @@ class TestModelProxy(unittest.TestCase):
         self.assertTrue(any("stop" in c for c in calls))
         self.assertTrue(
             any(
-                "start" in c and "qwen3-coder-flash.service" in c
+                "start" in c and "qwen3-coder-next.service" in c
                 for c in calls
             )
         )
@@ -100,7 +99,7 @@ class TestModelProxy(unittest.TestCase):
         """Test switching to the Thinking model and verification
         of the correct service."""
         main.web._test_data = json.dumps({
-            "model": "qwen3-thinking",
+            "model": "qwen3.5-thinking",
             "stream": False,
             "messages": []
         })
@@ -122,7 +121,7 @@ class TestModelProxy(unittest.TestCase):
         calls = [str(c) for c in mock_run.call_args_list]
         self.assertTrue(
             any(
-                "start" in c and "qwen3-thinking.service" in c
+                "start" in c and "qwen3.5-thinking.service" in c
                 for c in calls
             )
         )  # noqa: E501
@@ -133,7 +132,7 @@ class TestModelProxy(unittest.TestCase):
         """Test that even when stream: True is requested,
         it fetches the full response to repair it, but returns a fake SSE stream to the client."""
         main.web._test_data = json.dumps({
-            "model": "qwen3-coder-flash",  # noqa: E501
+            "model": "qwen3-coder-next",  # noqa: E501
             "stream": True,
             "messages": []
         })
@@ -184,7 +183,7 @@ class TestModelProxy(unittest.TestCase):
         """Test that content is set to null when tool_calls are present
         and that tool_calls arguments are repaired."""
         main.web._test_data = json.dumps({
-            "model": "qwen3-coder-flash",
+            "model": "qwen3-coder-next",
             "stream": False,
             "messages": [{"role": "user", "content": "Get weather"}]
         })
@@ -232,7 +231,7 @@ class TestModelProxy(unittest.TestCase):
     def test_no_json_repair_in_content(self, mock_get, mock_post, mock_run):
         """Test that main content is NOT repaired even if it looks like malformed JSON."""
         main.web._test_data = json.dumps({
-            "model": "qwen3-coder-flash",
+            "model": "qwen3-coder-next",
             "messages": [{"role": "user", "content": "Give me example"}]
         })
         mock_run.return_value = MagicMock(stdout="active")
@@ -262,9 +261,8 @@ class TestModelProxy(unittest.TestCase):
         data = json.loads(result)
 
         model_ids = [m["id"] for m in data["data"]]
-        self.assertIn("qwen3-coder-flash", model_ids)
+        self.assertIn("qwen3.5-thinking", model_ids)
         self.assertIn("qwen3-coder-next", model_ids)
-        self.assertIn("qwen3-thinking", model_ids)
         self.assertIn("bge-m3", model_ids)
         self.assertEqual(data["object"], "list")
 
@@ -281,7 +279,7 @@ class TestModelProxy(unittest.TestCase):
         main.TRACE_LOG_PATH = test_log
         try:
             # Test with extra whitespace to verify 1:1 preservation
-            raw_input_bytes = b' { "model": "qwen3-coder-flash" } '
+            raw_input_bytes = b' { "model": "qwen3-coder-next" } '
             main.web._test_data = raw_input_bytes
             mock_run.return_value = MagicMock(stdout="active")
             mock_get.return_value = MagicMock(status_code=200)
@@ -301,7 +299,7 @@ class TestModelProxy(unittest.TestCase):
             with open(test_log, 'r') as f:
                 content = f.read()
                 # Verify 1:1 input (including leading/trailing spaces)
-                self.assertIn("=== INPUT ===\n { \"model\": \"qwen3-coder-flash\" } ", content)
+                self.assertIn("=== INPUT ===\n { \"model\": \"qwen3-coder-next\" } ", content)
                 # Verify 1:1 output (exact bytes)
                 self.assertIn("=== RAW OUTPUT ===\n" + raw_output_bytes.decode(), content)
                 self.assertIn("=== FINAL OUTPUT ===", content)
