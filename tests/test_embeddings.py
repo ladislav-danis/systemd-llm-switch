@@ -34,12 +34,14 @@ class TestEmbeddingsAPI(unittest.TestCase):
         
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.content = json.dumps({
+        resp_data = {
             "object": "list",
             "data": [{"object": "embedding", "embedding": [0.1, 0.2], "index": 0}],
             "model": "bge-m3",
             "usage": {"prompt_tokens": 5, "total_tokens": 5}
-        }).encode('utf-8')
+        }
+        mock_resp.json.return_value = resp_data
+        mock_resp.content = json.dumps(resp_data).encode('utf-8')
         mock_post.return_value = mock_resp
 
         # Mock web.data()

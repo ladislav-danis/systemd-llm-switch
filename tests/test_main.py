@@ -154,7 +154,7 @@ class TestModelProxy(unittest.TestCase):
         import types
         self.assertIsInstance(result, types.GeneratorType)
         
-        chunks = list(result)
+        chunks = [c for c in result if not c.startswith(b': keep-alive')]
         self.assertEqual(len(chunks), 2)
         self.assertTrue(chunks[0].startswith(b'data: {'))
         self.assertIn(b'"object": "chat.completion.chunk"', chunks[0])

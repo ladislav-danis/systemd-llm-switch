@@ -1,54 +1,58 @@
+import unittest
 import requests
 import time
-import sys
+import socket
 
 PROXY_URL = "http://localhost:3002/v1/chat/completions"
 TEST_MODEL = "qwen3-coder-next"
 
-
-def run_smoke_test():
+def is_proxy_running() -> bool:
+    """Checks if the proxy server is listening on port 3002.
+    
+    Returns:
+        True if the port is open, False otherwise.
     """
-    Performs a real-world integration test against the running proxy.
-    This test expects the proxy server to be already active.
-    """
-    print(f"🚀 Starting smoke test against {PROXY_URL}...")
-    print(
-        f"📦 Target model: {TEST_MODEL} "
-        "(this may take a minute if model is loading)"
-    )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('localhost', 3002)) == 0
 
-    payload = {
-        "model": TEST_MODEL,
-        "messages": [
-            {"role": "user", "content": "Say 'OK' if you are working."}
-        ],
-        "stream": False
-    }
+class TestSmoke(unittest.TestCase):
+    """Smoke tests for the running proxy server."""
 
-    start_time = time.time()
-    try:
+    @unittest.skipUnless(is_proxy_running(), "Proxy server is not running on localhost:3002")
+    def test_chat_completion_smoke(self) -> None:
+        """Performs a real-world integration test against the running proxy.
+        
+        This test expects the proxy server to be already active. It verifies
+        that the model can be loaded and returns a valid response.
+        """
+        print(f"\n🚀 Starting smoke test against {PROXY_URL}...")
+        print(f"📦 Target model: {TEST_MODEL} (may take time if loading)")
+
+        payload = {
+            "model": TEST_MODEL,
+            "messages": [
+                {"role": "user", "content": "Say 'OK' if you are working."}
+            ],
+            "stream": False
+        }
+
+        start_time = time.time()
         # Longer time limit because the model
         # may be loaded into VRAM for the first time
         response = requests.post(PROXY_URL, json=payload, timeout=120)
         duration = time.time() - start_time
 
-        if response.status_code == 200:
-            data = response.json()
-            answer = data['choices'][0]['message']['content']
-            print(f"✅ Success! (Time: {duration:.2f}s)")
-            print(f"🤖 Model response: {answer}")
-        else:
-            print(f"❌ Failed! Status code: {response.status_code}")
-            print(f"📝 Error details: {response.text}")
-            sys.exit(1)
-
-    except requests.exceptions.ConnectionError:
-        print("❌ Error: Proxy server is not running on localhost:3002")
-        sys.exit(1)
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        sys.exit(1)
-
+        self.assertEqual(response.status_code, 200, f"Failed! Status code: {response.status_code}, Details: {response.text}")
+        
+        data = response.json()
+        self.assertIn('choices', data)
+        self.assertTrue(len(data['choices']) > 0)
+        
+        answer = data['choices'][0]['message']['content']
+        print(f"✅ Success! (Time: {duration:.2f}s)")
+        print(f"🤖 Model response: {answer}")
+        
+        self.assertTrue(len(answer) > 0)
 
 if __name__ == "__main__":
-    run_smoke_test()
+    unittest.main()

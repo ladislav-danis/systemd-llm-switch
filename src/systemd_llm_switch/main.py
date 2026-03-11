@@ -174,8 +174,12 @@ urls = (
 )
 
 
-def repair_tool_calls(tool_calls: List[Dict[str, Any]]):
-    """Utility to repair JSON in tool call arguments if they are malformed."""
+def repair_tool_calls(tool_calls: List[Dict[str, Any]]) -> None:
+    """Utility to repair JSON in tool call arguments if they are malformed.
+
+    Args:
+        tool_calls: A list of tool call dictionaries to be repaired in-place.
+    """
     for tool in tool_calls:
         func = tool.get("function", {})
         args = func.get("arguments", "")
@@ -273,8 +277,12 @@ class ChatProxy:
             logging.error(f"Model {target_model} did not start on time")
             return False
 
-    def POST(self):
-        """Processes incoming chat completions requests."""
+    def POST(self) -> Any:
+        """Processes incoming chat completions requests.
+
+        Returns:
+            A JSON response string or a generator for streaming.
+        """
         try:
             raw_body = web.data()
             if not raw_body:
@@ -336,7 +344,10 @@ class ChatProxy:
                     choices = resp_data.get("choices", [])
                     if choices:
                         message = choices[0].get("message", {})
-                        repair_tool_calls(message.get("tool_calls", []))
+                        tcs = message.get("tool_calls", [])
+                        if tcs:
+                            repair_tool_calls(tcs)
+                            message["content"] = None
                     
                     log_trace(raw_body, result.content, resp_data)
 
@@ -355,7 +366,11 @@ class ChatProxy:
                 resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json=data, timeout=(10, 1800))
                 resp_data = resp.json()
                 if "choices" in resp_data:
-                    repair_tool_calls(resp_data["choices"][0].get("message", {}).get("tool_calls", []))
+                    message = resp_data["choices"][0].get("message", {})
+                    tcs = message.get("tool_calls", [])
+                    if tcs:
+                        repair_tool_calls(tcs)
+                        message["content"] = None
                 log_trace(raw_body, resp.content, resp_data)
                 web.header('Content-Type', 'application/json')
                 return json.dumps(resp_data)
@@ -368,7 +383,16 @@ class ChatProxy:
 
 class ModelDetail:
     """Endpoint for retrieving details of a specific model."""
-    def GET(self, model_id):
+
+    def GET(self, model_id: str) -> str:
+        """Retrieves metadata for a specific model.
+
+        Args:
+            model_id: The identifier of the model.
+
+        Returns:
+            A JSON string with model details.
+        """
         if model_id not in MODELS:
             web.ctx.status = "404 Not Found"
             return json.dumps({"error": "Model not found"})
@@ -385,7 +409,13 @@ class ModelDetail:
 
 class ListModels:
     """Endpoint for listing available models."""
-    def GET(self):
+
+    def GET(self) -> str:
+        """Lists all configured models.
+
+        Returns:
+            A JSON string containing a list of model objects.
+        """
         web.header('Content-Type', 'application/json')
         models_list = [
             {
@@ -399,7 +429,13 @@ class ListModels:
 
 class EmbeddingsProxy:
     """Proxy handler for processing embedding requests."""
-    def POST(self):
+
+    def POST(self) -> str:
+        """Forwards embedding requests to the backend after model switching.
+
+        Returns:
+            A JSON string with embeddings or an error message.
+        """
         try:
             raw_body = web.data()
             data = json.loads(raw_body)
@@ -415,7 +451,10 @@ class EmbeddingsProxy:
             resp = requests.post(f"{LLAMA_URL}/v1/embeddings", json=data, timeout=(10, 600))
             if resp.status_code != 200:
                 web.ctx.status = f"{resp.status_code} {resp.reason}"
-                return resp.content
+                try:
+                    return json.dumps(resp.json())
+                except Exception:
+                    return json.dumps({"error": f"Backend returned {resp.status_code}"})
 
             resp_data = resp.json()
             if "data" in resp_data:
@@ -435,7 +474,13 @@ class EmbeddingsProxy:
 
 class ConversationsHandler:
     """Handler for managing conversation creation."""
-    def POST(self):
+
+    def POST(self) -> str:
+        """Creates a new conversation, optionally with initial items.
+
+        Returns:
+            A JSON string representing the created conversation.
+        """
         try:
             raw_body = web.data()
             data = json.loads(raw_body) if raw_body else {}
