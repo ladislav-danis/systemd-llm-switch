@@ -7,6 +7,8 @@ import threading
 import yaml
 import sys
 import logging
+import base64
+import uuid
 from json_repair import repair_json
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -157,9 +159,11 @@ urls = (
     '/v1/embeddings', 'EmbeddingsProxy',
     '/v1/models', 'ListModels',
     '/v1/responses', 'ResponsesHandler',
+    '/v1/responses/input_tokens', 'ResponsesInputTokensHandler',
     '/v1/responses/compact', 'ResponsesCompactHandler',
     '/v1/responses/([^/]+)', 'ResponsesDetailHandler',
     '/v1/responses/([^/]+)/items', 'ResponsesItemsHandler',
+    '/v1/responses/([^/]+)/input_items', 'ResponsesInputItemsHandler',
     '/v1/responses/([^/]+)/cancel', 'ResponsesCancelHandler'
 )
 
@@ -467,7 +471,7 @@ class ResponsesHandler:
             client_wants_stream = data.get("stream", False)
             
             target_model = data.get("model")
-            conversation_id = data.get("conversation_id")
+            conversation_id = data.get("conversation") or data.get("conversation_id")
             previous_response_id = data.get("previous_response_id")
             input_items = data.get("input", [])
             instructions = data.get("instructions")
@@ -523,16 +527,11 @@ class ResponsesHandler:
                 elif item_type == "compaction":
                     # Handle compaction items by injecting their content into the history
                     content = item.get("encrypted_content", "")
-                    # We store the summary directly or base64 encoded.
-                    # For now, let's assume it's plain text or base64.
-                    import base64
                     try:
                         summary = base64.b64decode(content).decode('utf-8')
                     except Exception:
                         summary = content
                     
-                    # We don't save compaction items to SQLite items table as regular messages
-                    # to avoid cluttering, but we include them in the history sent to backend.
                     current_messages.append({
                         "role": "system", 
                         "content": f"Previous conversation summary: {summary}"
@@ -544,8 +543,6 @@ class ResponsesHandler:
                 up_to_response_id=previous_response_id
             )
             
-            # If we are branching, the fetched history ends at previous_response_id.
-            # We must append the CURRENT messages that we just added to the DB.
             if previous_response_id:
                 history.extend(current_messages)
             
@@ -554,7 +551,6 @@ class ResponsesHandler:
                 history.insert(0, {"role": "system", "content": instructions})
 
             # 4. Prepare backend request (Chat Completions)
-            # Flatten tool definitions if present
             backend_tools = []
             for tool in data.get("tools", []):
                 if tool.get("type") == "function":
@@ -570,7 +566,7 @@ class ResponsesHandler:
             backend_payload = {
                 "model": target_model,
                 "messages": history,
-                "stream": False  # Force stream=False for backend processing
+                "stream": False
             }
             if backend_tools:
                 backend_payload["tools"] = backend_tools
@@ -640,7 +636,6 @@ class ResponsesHandler:
             final_response = db.get_response(response_id)
 
             if client_wants_stream:
-                # Simulace Responses API streamu
                 web.header('Content-Type', 'text/event-stream')
                 web.header('Cache-Control', 'no-cache')
                 web.header('Connection', 'keep-alive')
@@ -650,21 +645,15 @@ class ResponsesHandler:
                     def sse(event, data_obj):
                         return f"event: {event}\ndata: {json.dumps(data_obj)}\n\n".encode('utf-8')
 
-                    # Envelope: created
                     yield sse("response.created", resp_obj)
-                    
-                    # Output items
                     for item in resp_obj.get("output", []):
                         yield sse("response.output_item.added", {"item": item})
                         yield sse("response.output_item.done", {"item": item})
-                    
-                    # Final envelope: completed
                     yield sse("response.completed", resp_obj)
                     yield b"data: [DONE]\n\n"
 
                 return response_stream(final_response)
             else:
-                # Classic JSON response
                 web.header('Content-Type', 'application/json')
                 return json.dumps(final_response)
 
@@ -699,7 +688,7 @@ class ResponsesDetailHandler:
                 return json.dumps({"error": "Response not found"})
             
             web.header('Content-Type', 'application/json')
-            return json.dumps({"id": response_id, "object": "response.deleted", "deleted": True})
+            return json.dumps({"id": response_id, "object": "response", "deleted": True})
         except Exception as e:
             logging.error(f"Error in ResponsesDetailHandler (DELETE): {e}")
             web.ctx.status = "500 Internal Server Error"
@@ -724,14 +713,10 @@ class ResponsesCompactHandler:
                 web.ctx.status = "400 Bad Request"
                 return json.dumps({"error": "model is required"})
 
-            # Attempt to switch models
             if not ChatProxy.switch_model(target_model):
                 web.ctx.status = "500 Internal Server Error"
-                return json.dumps(
-                    {"error": f"Failed to activate model {target_model}"}
-                )
+                return json.dumps({"error": f"Failed to activate model {target_model}"})
 
-            # Extract text from input items to summarize
             full_text = ""
             for item in input_items:
                 if isinstance(item, str):
@@ -740,7 +725,6 @@ class ResponsesCompactHandler:
                     if item.get("type") == "input_text":
                         full_text += f"User: {item.get('text')}\n"
                     elif item.get("role") == "assistant":
-                        # Standard message items
                         content = item.get("content", [])
                         if isinstance(content, list):
                             for c in content:
@@ -749,7 +733,6 @@ class ResponsesCompactHandler:
                         elif isinstance(content, str):
                             full_text += f"Assistant: {content}\n"
 
-            # Call backend to summarize
             summary_prompt = f"Summarize the following conversation concisely for future context:\n\n{full_text}"
             backend_payload = {
                 "model": target_model,
@@ -757,27 +740,20 @@ class ResponsesCompactHandler:
                 "stream": False
             }
 
-            resp = requests.post(
-                f"{LLAMA_URL}/v1/chat/completions",
-                json=backend_payload,
-                timeout=(10, 600)
-            )
-            
+            resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json=backend_payload, timeout=(10, 600))
             if resp.status_code != 200:
                 web.ctx.status = f"{resp.status_code} {resp.reason}"
                 return resp.content
 
             summary = resp.json()["choices"][0]["message"]["content"]
-            
-            # OpenAI uses base64 for encrypted_content
-            import base64
             encoded_summary = base64.b64encode(summary.encode('utf-8')).decode('utf-8')
 
             result = {
                 "id": f"resp_{uuid.uuid4().hex[:12]}",
-                "object": "response.compaction",
+                "object": "response",
                 "created_at": int(time.time()),
                 "model": target_model,
+                "status": "completed",
                 "output": [
                     {
                         "id": f"cmp_{uuid.uuid4().hex[:12]}",
@@ -797,19 +773,76 @@ class ResponsesCompactHandler:
 
 
 class ResponsesItemsHandler:
-    """Handler for listing items of a specific response."""
+    """Handler for listing output items of a specific response."""
     
     def GET(self, response_id):
         try:
             items = db.get_response_items(response_id)
             web.header('Content-Type', 'application/json')
-            return json.dumps({
-                "object": "list",
-                "data": items,
-                "has_more": False
-            })
+            return json.dumps({"object": "list", "data": items, "has_more": False})
         except Exception as e:
             logging.error(f"Error in ResponsesItemsHandler: {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class ResponsesInputItemsHandler:
+    """Handler for listing input items of a specific response."""
+    
+    def GET(self, response_id):
+        try:
+            response_obj = db.get_response(response_id)
+            if not response_obj:
+                web.ctx.status = "404 Not Found"
+                return json.dumps({"error": "Response not found"})
+            
+            conv_id = response_obj["conversation_id"]
+            history = db.get_conversation_history(conv_id, up_to_response_id=response_id)
+            
+            items = []
+            for i, msg in enumerate(history):
+                items.append({
+                    "id": f"input_item_{response_id}_{i}",
+                    "object": "item",
+                    "type": "message",
+                    "role": msg["role"],
+                    "content": [{"type": "output_text", "text": msg["content"]}]
+                })
+
+            web.header('Content-Type', 'application/json')
+            return json.dumps({"object": "list", "data": items, "has_more": False})
+        except Exception as e:
+            logging.error(f"Error in ResponsesInputItemsHandler: {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class ResponsesInputTokensHandler:
+    """Handler for counting input tokens."""
+    
+    def POST(self):
+        try:
+            raw_body = web.data()
+            if not raw_body:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "No data provided"})
+
+            data = json.loads(raw_body)
+            input_items = data.get("input", [])
+            total_chars = 0
+            for item in input_items:
+                if isinstance(item, dict) and item.get("type") == "input_text":
+                    total_chars += len(item.get("text", ""))
+            
+            result = {
+                "object": "response.input_tokens",
+                "input_tokens": total_chars // 4
+            }
+            
+            web.header('Content-Type', 'application/json')
+            return json.dumps(result)
+        except Exception as e:
+            logging.error(f"Error in ResponsesInputTokensHandler: {e}")
             web.ctx.status = "500 Internal Server Error"
             return json.dumps({"error": str(e)})
 
@@ -819,13 +852,11 @@ class ResponsesCancelHandler:
     
     def POST(self, response_id):
         try:
-            # Since we process synchronously, it's either already done or doesn't exist
             response_obj = db.get_response(response_id)
             if not response_obj:
                 web.ctx.status = "404 Not Found"
                 return json.dumps({"error": "Response not found"})
             
-            # Return current state (likely 'completed')
             web.header('Content-Type', 'application/json')
             return json.dumps(response_obj)
         except Exception as e:
@@ -837,16 +868,10 @@ class ResponsesCancelHandler:
 app = web.application(urls, globals())
 
 if __name__ == "__main__":
-    # 1. Setting global variables from the configuration
     server_port = CONFIG['server']['port']
     server_host = CONFIG['server']['host']
-
-    # 2. Adjusting server startup
-    # Add the host and port from the configuration to the arguments for web.py
     sys.argv.append(f'{server_host}:{server_port}')
 
-    logging.info(
-        f"The proxy server runs on http://{server_host}:{server_port}"
-    )
+    logging.info(f"The proxy server runs on http://{server_host}:{server_port}")
     logging.info(f"Available models: {', '.join(MODELS.keys())}")
     app.run()
