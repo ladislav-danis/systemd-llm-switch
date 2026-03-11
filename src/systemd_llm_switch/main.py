@@ -154,6 +154,7 @@ def run_systemctl_user(
 # Routing definitions for web.py
 urls = (
     '/v1/chat/completions', 'ChatProxy',
+    '/v1/embeddings', 'EmbeddingsProxy',
     '/v1/models', 'ListModels',
     '/v1/responses', 'ResponsesHandler',
     '/v1/responses/([^/]+)', 'ResponsesDetailHandler',
@@ -405,6 +406,49 @@ class ListModels:
             } for m in MODELS.keys()
         ]
         return json.dumps({"object": "list", "data": models_list})
+
+
+class EmbeddingsProxy:
+    """Proxy handler for processing embedding requests."""
+
+    def POST(self):
+        try:
+            raw_body = web.data()
+            if not raw_body:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "No data provided"})
+
+            data = json.loads(raw_body)
+            target_model = data.get("model")
+
+            if not target_model:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "Model is required"})
+
+            # Attempt to switch models
+            if not ChatProxy.switch_model(target_model):
+                web.ctx.status = "500 Internal Server Error"
+                return json.dumps(
+                    {"error": f"Failed to activate model {target_model}"}
+                )
+
+            # Forwarding the request to the llama.cpp backend
+            resp = requests.post(
+                f"{LLAMA_URL}/v1/embeddings",
+                json=data,
+                timeout=(10, 600)
+            )
+
+            web.header('Content-Type', 'application/json')
+            return resp.content
+
+        except json.JSONDecodeError:
+            web.ctx.status = "400 Bad Request"
+            return json.dumps({"error": "Invalid JSON"})
+        except Exception as e:
+            logging.error(f"Error in EmbeddingsProxy: {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
 
 
 class ResponsesHandler:
