@@ -157,6 +157,7 @@ urls = (
     '/v1/embeddings', 'EmbeddingsProxy',
     '/v1/models', 'ListModels',
     '/v1/responses', 'ResponsesHandler',
+    '/v1/responses/compact', 'ResponsesCompactHandler',
     '/v1/responses/([^/]+)', 'ResponsesDetailHandler',
     '/v1/responses/([^/]+)/items', 'ResponsesItemsHandler',
     '/v1/responses/([^/]+)/cancel', 'ResponsesCancelHandler'
@@ -657,7 +658,7 @@ class ResponsesHandler:
 
 
 class ResponsesDetailHandler:
-    """Handler for retrieving details of a specific response."""
+    """Handler for retrieving or deleting a specific response."""
     
     def GET(self, response_id):
         try:
@@ -669,7 +670,47 @@ class ResponsesDetailHandler:
             web.header('Content-Type', 'application/json')
             return json.dumps(response_obj)
         except Exception as e:
-            logging.error(f"Error in ResponsesDetailHandler: {e}")
+            logging.error(f"Error in ResponsesDetailHandler (GET): {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+    def DELETE(self, response_id):
+        try:
+            success = db.delete_response(response_id)
+            if not success:
+                web.ctx.status = "404 Not Found"
+                return json.dumps({"error": "Response not found"})
+            
+            web.header('Content-Type', 'application/json')
+            return json.dumps({"id": response_id, "object": "response.deleted", "deleted": True})
+        except Exception as e:
+            logging.error(f"Error in ResponsesDetailHandler (DELETE): {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class ResponsesCompactHandler:
+    """Handler for compacting a conversation."""
+    
+    def POST(self):
+        try:
+            raw_body = web.data()
+            if not raw_body:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "No data provided"})
+
+            data = json.loads(raw_body)
+            conversation_id = data.get("conversation_id")
+            
+            if not conversation_id:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "conversation_id is required"})
+
+            result = db.compact_conversation(conversation_id)
+            web.header('Content-Type', 'application/json')
+            return json.dumps(result)
+        except Exception as e:
+            logging.error(f"Error in ResponsesCompactHandler: {e}")
             web.ctx.status = "500 Internal Server Error"
             return json.dumps({"error": str(e)})
 
