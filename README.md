@@ -138,7 +138,8 @@ models:
 
 ### 🏛️ 100% OpenAI Responses API Compatibility
 The proxy now fully supports the modern, stateful [Responses API](https://developers.openai.com/api/reference/resources/responses/):
-*   **Conversation Persistence**: Uses a local SQLite database to store chat history, enabling `conversation_id` and `previous_response_id` functionality.
+*   **Conversation Persistence**: Uses a local SQLite database to store chat history, enabling `conversation_id` functionality.
+*   **Context Branching**: Supports `previous_response_id` for creating parallel conversation branches with precise context isolation.
 *   **Unified Endpoints**: Implements `/v1/responses`, `/v1/responses/{id}`, `/v1/responses/{id}/items`, and `/v1/responses/{id}/cancel`.
 *   **Advanced Parameter Support**: Full support for `instructions` (automatically converted to System Messages) and `metadata`.
 *   **Modern Schema**: Translates between the flattened Responses API tool definitions and the nested Chat Completions backend.
