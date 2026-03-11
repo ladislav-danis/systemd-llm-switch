@@ -444,8 +444,33 @@ class EmbeddingsProxy:
                 timeout=(10, 600)
             )
 
-            web.header('Content-Type', 'application/json')
-            return resp.content
+            if resp.status_code != 200:
+                web.ctx.status = f"{resp.status_code} {resp.reason}"
+                return resp.content
+
+            # Parse and ensure 100% OpenAI compliance
+            try:
+                resp_data = resp.json()
+                if "data" in resp_data:
+                    for i, item in enumerate(resp_data["data"]):
+                        if "object" not in item:
+                            item["object"] = "embedding"
+                        if "index" not in item:
+                            item["index"] = i
+                
+                # Ensure object is "list"
+                if "object" not in resp_data:
+                    resp_data["object"] = "list"
+                
+                # Ensure model name matches requested one
+                resp_data["model"] = target_model
+
+                web.header('Content-Type', 'application/json')
+                return json.dumps(resp_data)
+            except Exception:
+                # Fallback to raw content if parsing fails
+                web.header('Content-Type', 'application/json')
+                return resp.content
 
         except json.JSONDecodeError:
             web.ctx.status = "400 Bad Request"

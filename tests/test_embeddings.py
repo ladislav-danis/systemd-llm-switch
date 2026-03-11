@@ -54,7 +54,10 @@ class TestEmbeddingsAPI(unittest.TestCase):
         # Verify result
         data = json.loads(result)
         self.assertEqual(data["model"], "bge-m3")
+        self.assertEqual(data["object"], "list")
         self.assertEqual(data["data"][0]["embedding"], [0.1, 0.2])
+        self.assertEqual(data["data"][0]["object"], "embedding")
+        self.assertEqual(data["data"][0]["index"], 0)
         
         # Verify switch_model was called
         mock_switch.assert_called_with("bge-m3")
