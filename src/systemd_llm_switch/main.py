@@ -10,10 +10,22 @@ import logging
 from json_repair import repair_json
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+
+# Fix imports for both standalone and package execution
 try:
     from .db import Database
-except ImportError:
-    from systemd_llm_switch.db import Database
+except (ImportError, ValueError):
+    try:
+        import db
+        Database = db.Database
+    except ImportError:
+        try:
+            from systemd_llm_switch.db import Database
+        except ImportError:
+            # Last resort: use the sys/Path already imported at the top
+            sys.path.append(str(Path(__file__).parent))
+            import db
+            Database = db.Database
 
 # --------------------
 # - Logging settings -
