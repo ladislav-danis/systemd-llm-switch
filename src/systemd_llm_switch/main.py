@@ -855,23 +855,85 @@ class ResponsesHandler:
             final_response = db.get_response(response_id)
 
             if client_wants_stream:
+                # Granular Responses API stream simulation
                 web.header('Content-Type', 'text/event-stream')
                 web.header('Cache-Control', 'no-cache')
                 web.header('Connection', 'keep-alive')
                 web.header('X-Accel-Buffering', 'no')
 
-                def response_stream(resp_obj):
+                # We need reasoning_content from raw backend response if available
+                backend_msg = {}
+                if "choices" in resp_data and len(resp_data["choices"]) > 0:
+                    backend_msg = resp_data["choices"][0].get("message", {})
+                
+                reasoning = backend_msg.get("reasoning_content")
+
+                def response_stream(resp_obj, reasoning_content):
                     def sse(event, data_obj):
                         return f"event: {event}\ndata: {json.dumps(data_obj)}\n\n".encode('utf-8')
 
+                    # 1. Envelope: created
                     yield sse("response.created", resp_obj)
-                    for item in resp_obj.get("output", []):
+                    
+                    # 2. Process Output items
+                    for out_idx, item in enumerate(resp_obj.get("output", [])):
+                        # item.added
                         yield sse("response.output_item.added", {"item": item})
+                        
+                        if item["type"] == "message":
+                            # Process content parts
+                            for part_idx, part in enumerate(item.get("content", [])):
+                                # content_part.added
+                                yield sse("response.content_part.added", {
+                                    "response_id": resp_obj["id"],
+                                    "output_index": out_idx,
+                                    "content_index": part_idx,
+                                    "part": part
+                                })
+                                
+                                if part["type"] == "output_text":
+                                    # reasoning.delta (if any)
+                                    if reasoning_content:
+                                        yield sse("response.reasoning.delta", {
+                                            "response_id": resp_obj["id"],
+                                            "output_index": out_idx,
+                                            "content_index": part_idx,
+                                            "delta": reasoning_content
+                                        })
+                                    
+                                    # text.delta
+                                    yield sse("response.text.delta", {
+                                        "response_id": resp_obj["id"],
+                                        "output_index": out_idx,
+                                        "content_index": part_idx,
+                                        "delta": part["text"]
+                                    })
+                                
+                                # content_part.done
+                                yield sse("response.content_part.done", {
+                                    "response_id": resp_obj["id"],
+                                    "output_index": out_idx,
+                                    "content_index": part_idx,
+                                    "part": part
+                                })
+                        
+                        elif item["type"] == "function_call":
+                            # function_call.arguments.delta
+                            yield sse("response.function_call.arguments.delta", {
+                                "response_id": resp_obj["id"],
+                                "output_index": out_idx,
+                                "call_id": item.get("call_id"),
+                                "delta": item.get("arguments")
+                            })
+
+                        # item.done
                         yield sse("response.output_item.done", {"item": item})
-                    yield sse("response.completed", resp_obj)
+                    
+                    # 3. Final envelope: done (contains full response)
+                    yield sse("response.done", {"response": resp_obj})
                     yield b"data: [DONE]\n\n"
 
-                return response_stream(final_response)
+                return response_stream(final_response, reasoning)
             else:
                 web.header('Content-Type', 'application/json')
                 return json.dumps(final_response)

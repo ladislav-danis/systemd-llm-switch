@@ -88,8 +88,11 @@ class TestResponsesAPI(unittest.TestCase):
         
         self.assertIn('event: response.created', content)
         self.assertIn('event: response.output_item.added', content)
+        self.assertIn('event: response.content_part.added', content)
+        self.assertIn('event: response.text.delta', content)
+        self.assertIn('event: response.content_part.done', content)
         self.assertIn('event: response.output_item.done', content)
-        self.assertIn('event: response.completed', content)
+        self.assertIn('event: response.done', content)
         self.assertIn('data: [DONE]', content)
 
 if __name__ == '__main__':
