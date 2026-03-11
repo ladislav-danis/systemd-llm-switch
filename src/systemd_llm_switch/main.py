@@ -756,185 +756,240 @@ class ResponsesHandler:
                         "content": f"Previous conversation summary: {summary}"
                     })
 
-            # 3. Reconstruct history for the backend
-            history = db.get_conversation_history(
-                conversation_id, 
-                up_to_response_id=previous_response_id
-            )
-            
-            if previous_response_id:
-                history.extend(current_messages)
-            
-            # Add instructions as system message if present
-            if instructions:
-                history.insert(0, {"role": "system", "content": instructions})
-
-            # 4. Prepare backend request (Chat Completions)
-            backend_tools = []
-            for tool in data.get("tools", []):
-                if tool.get("type") == "function":
-                    backend_tools.append({
-                        "type": "function",
-                        "function": {
-                            "name": tool.get("name"),
-                            "description": tool.get("description", ""),
-                            "parameters": tool.get("parameters", {})
-                        }
-                    })
-
-            backend_payload = {
-                "model": target_model,
-                "messages": history,
-                "stream": False
-            }
-            if backend_tools:
-                backend_payload["tools"] = backend_tools
-
-            # 5. Call backend
-            resp = requests.post(
-                f"{LLAMA_URL}/v1/chat/completions",
-                json=backend_payload,
-                timeout=(10, 1800)
-            )
-            
-            if resp.status_code != 200:
-                web.ctx.status = f"{resp.status_code} {resp.reason}"
-                return resp.content
-
-            resp_data = resp.json()
-            
-            # 6. Create Response object and store output items
+            # 3. Create response object in DB (initial state)
             response_id = db.create_response(
                 conversation_id, 
                 target_model, 
+                status="in_progress",
                 instructions=instructions,
                 metadata=metadata
             )
-            
-            if "choices" in resp_data and len(resp_data["choices"]) > 0:
-                message = resp_data["choices"][0].get("message", {})
-                
-                # Handle text content
-                assistant_content = message.get("content")
-                if assistant_content:
-                    db.add_item(
-                        conversation_id, 
-                        response_id, 
-                        "message", 
-                        "assistant", 
-                        {"text": assistant_content}
-                    )
-                
-                # Handle tool calls
-                tool_calls = message.get("tool_calls", [])
-                repair_tool_calls(tool_calls)
-                for tc in tool_calls:
-                    func = tc.get("function", {})
-                    db.add_item(
-                        conversation_id,
-                        response_id,
-                        "function_call",
-                        "assistant",
-                        {
-                            "call_id": tc.get("id"),
-                            "name": func.get("name"),
-                            "arguments": func.get("arguments")
-                        }
-                    )
 
-            # 7. Finalize response object in DB
-            usage = resp_data.get("usage", {})
-            db.update_response(
-                response_id, 
-                "completed", 
-                usage=usage,
-                metadata=metadata
-            )
-
-            # 8. Return Response object
-            final_response = db.get_response(response_id)
-
+            # 4. Prepare for streaming or sync response
             if client_wants_stream:
-                # Granular Responses API stream simulation
                 web.header('Content-Type', 'text/event-stream')
                 web.header('Cache-Control', 'no-cache')
                 web.header('Connection', 'keep-alive')
                 web.header('X-Accel-Buffering', 'no')
 
-                # We need reasoning_content from raw backend response if available
-                backend_msg = {}
-                if "choices" in resp_data and len(resp_data["choices"]) > 0:
-                    backend_msg = resp_data["choices"][0].get("message", {})
-                
-                reasoning = backend_msg.get("reasoning_content")
-
-                def response_stream(resp_obj, reasoning_content):
+                def response_stream_handler():
                     def sse(event, data_obj):
                         return f"event: {event}\ndata: {json.dumps(data_obj)}\n\n".encode('utf-8')
 
-                    # 1. Envelope: created
-                    yield sse("response.created", resp_obj)
+                    # Immediately yield created event to keep connection alive
+                    initial_response = db.get_response(response_id)
+                    yield sse("response.created", initial_response)
+
+                    # --- HEAVY LIFTING STARTS HERE ---
+                    # 5. Reconstruct history for the backend
+                    history = db.get_conversation_history(
+                        conversation_id, 
+                        up_to_response_id=previous_response_id
+                    )
                     
-                    # 2. Process Output items
-                    for out_idx, item in enumerate(resp_obj.get("output", [])):
-                        # item.added
-                        yield sse("response.output_item.added", {"item": item})
-                        
-                        if item["type"] == "message":
-                            # Process content parts
-                            for part_idx, part in enumerate(item.get("content", [])):
-                                # content_part.added
-                                yield sse("response.content_part.added", {
-                                    "response_id": resp_obj["id"],
-                                    "output_index": out_idx,
-                                    "content_index": part_idx,
-                                    "part": part
-                                })
-                                
-                                if part["type"] == "output_text":
-                                    # reasoning.delta (if any)
-                                    if reasoning_content:
-                                        yield sse("response.reasoning.delta", {
-                                            "response_id": resp_obj["id"],
-                                            "output_index": out_idx,
-                                            "content_index": part_idx,
-                                            "delta": reasoning_content
-                                        })
-                                    
-                                    # text.delta
-                                    yield sse("response.text.delta", {
-                                        "response_id": resp_obj["id"],
-                                        "output_index": out_idx,
-                                        "content_index": part_idx,
-                                        "delta": part["text"]
-                                    })
-                                
-                                # content_part.done
-                                yield sse("response.content_part.done", {
-                                    "response_id": resp_obj["id"],
-                                    "output_index": out_idx,
-                                    "content_index": part_idx,
-                                    "part": part
-                                })
-                        
-                        elif item["type"] == "function_call":
-                            # function_call.arguments.delta
-                            yield sse("response.function_call.arguments.delta", {
-                                "response_id": resp_obj["id"],
-                                "output_index": out_idx,
-                                "call_id": item.get("call_id"),
-                                "delta": item.get("arguments")
+                    # If we are branching, the fetched history ends at previous_response_id.
+                    # We must append the CURRENT messages that we just added to the DB.
+                    if previous_response_id:
+                        history.extend(current_messages)
+                    
+                    # Add instructions as system message if present
+                    if instructions:
+                        history.insert(0, {"role": "system", "content": instructions})
+
+                    # 6. Call backend
+                    backend_tools = []
+                    for tool in data.get("tools", []):
+                        if tool.get("type") == "function":
+                            backend_tools.append({
+                                "type": "function",
+                                "function": {
+                                    "name": tool.get("name"),
+                                    "description": tool.get("description", ""),
+                                    "parameters": tool.get("parameters", {})
+                                }
                             })
 
-                        # item.done
-                        yield sse("response.output_item.done", {"item": item})
-                    
-                    # 3. Final envelope: done (contains full response)
-                    yield sse("response.done", {"response": resp_obj})
-                    yield b"data: [DONE]\n\n"
+                    backend_payload = {
+                        "model": target_model,
+                        "messages": history,
+                        "stream": False
+                    }
+                    if backend_tools:
+                        backend_payload["tools"] = backend_tools
 
-                return response_stream(final_response, reasoning)
+                    try:
+                        resp = requests.post(
+                            f"{LLAMA_URL}/v1/chat/completions",
+                            json=backend_payload,
+                            timeout=(10, 1800)
+                        )
+                        
+                        if resp.status_code != 200:
+                            yield sse("error", {"message": f"Backend error: {resp.status_code}", "type": "backend_error"})
+                            return
+
+                        resp_data = resp.json()
+                        backend_msg = resp_data["choices"][0].get("message", {})
+                        reasoning = backend_msg.get("reasoning_content")
+                        
+                        # Store output items
+                        # Handle text content
+                        assistant_content = backend_msg.get("content")
+                        if assistant_content:
+                            db.add_item(
+                                conversation_id, 
+                                response_id, 
+                                "message", 
+                                "assistant", 
+                                {"text": assistant_content}
+                            )
+                        
+                        # Handle tool calls
+                        tool_calls = backend_msg.get("tool_calls", [])
+                        repair_tool_calls(tool_calls)
+                        for tc in tool_calls:
+                            func = tc.get("function", {})
+                            db.add_item(
+                                conversation_id,
+                                response_id,
+                                "function_call",
+                                "assistant",
+                                {
+                                    "call_id": tc.get("id"),
+                                    "name": func.get("name"),
+                                    "arguments": func.get("arguments")
+                                }
+                            )
+
+                        # Finalize response object in DB
+                        usage = resp_data.get("usage", {})
+                        db.update_response(
+                            response_id, 
+                            "completed", 
+                            usage=usage,
+                            metadata=metadata
+                        )
+
+                        # Fetch final response for stream envelopes
+                        final_response_obj = db.get_response(response_id)
+
+                        # 7. Emit granular stream events
+                        for out_idx, item in enumerate(final_response_obj.get("output", [])):
+                            yield sse("response.output_item.added", {"item": item})
+                            
+                            if item["type"] == "message":
+                                for part_idx, part in enumerate(item.get("content", [])):
+                                    yield sse("response.content_part.added", {
+                                        "response_id": response_id,
+                                        "output_index": out_idx,
+                                        "content_index": part_idx,
+                                        "part": part
+                                    })
+                                    
+                                    if part["type"] == "output_text":
+                                        if reasoning:
+                                            yield sse("response.reasoning.delta", {
+                                                "response_id": response_id,
+                                                "output_index": out_idx,
+                                                "content_index": part_idx,
+                                                "delta": reasoning
+                                            })
+                                        yield sse("response.text.delta", {
+                                            "response_id": response_id,
+                                            "output_index": out_idx,
+                                            "content_index": part_idx,
+                                            "delta": part["text"]
+                                        })
+                                    
+                                    yield sse("response.content_part.done", {
+                                        "response_id": response_id,
+                                        "output_index": out_idx,
+                                        "content_index": part_idx,
+                                        "part": part
+                                    })
+                            
+                            elif item["type"] == "function_call":
+                                yield sse("response.function_call.arguments.delta", {
+                                    "response_id": response_id,
+                                    "output_index": out_idx,
+                                    "call_id": item.get("call_id"),
+                                    "delta": item.get("arguments")
+                                })
+
+                            yield sse("response.output_item.done", {"item": item})
+                        
+                        yield sse("response.done", {"response": final_response_obj})
+                        yield b"data: [DONE]\n\n"
+
+                    except Exception as e:
+                        logging.error(f"Stream error: {e}", exc_info=True)
+                        yield sse("error", {"message": str(e), "type": "internal_error"})
+
+                return response_stream_handler()
+
             else:
+                # --- SYNC MODE (unchanged logic but uses response_id created above) ---
+                # 5. Reconstruct history
+                history = db.get_conversation_history(
+                    conversation_id, 
+                    up_to_response_id=previous_response_id
+                )
+                if previous_response_id:
+                    history.extend(current_messages)
+                if instructions:
+                    history.insert(0, {"role": "system", "content": instructions})
+
+                # 6. Call backend
+                backend_tools = []
+                for tool in data.get("tools", []):
+                    if tool.get("type") == "function":
+                        backend_tools.append({
+                            "type": "function",
+                            "function": {
+                                "name": tool.get("name"),
+                                "description": tool.get("description", ""),
+                                "parameters": tool.get("parameters", {})
+                            }
+                        })
+
+                backend_payload = {
+                    "model": target_model,
+                    "messages": history,
+                    "stream": False
+                }
+                if backend_tools:
+                    backend_payload["tools"] = backend_tools
+
+                resp = requests.post(
+                    f"{LLAMA_URL}/v1/chat/completions",
+                    json=backend_payload,
+                    timeout=(10, 1800)
+                )
+                
+                if resp.status_code != 200:
+                    web.ctx.status = f"{resp.status_code} {resp.reason}"
+                    return resp.content
+
+                resp_data = resp.json()
+                backend_msg = resp_data["choices"][0].get("message", {})
+                
+                # Store output items
+                assistant_content = backend_msg.get("content")
+                if assistant_content:
+                    db.add_item(conversation_id, response_id, "message", "assistant", {"text": assistant_content})
+                
+                tool_calls = backend_msg.get("tool_calls", [])
+                repair_tool_calls(tool_calls)
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    db.add_item(conversation_id, response_id, "function_call", "assistant", {
+                        "call_id": tc.get("id"), "name": func.get("name"), "arguments": func.get("arguments")
+                    })
+
+                usage = resp_data.get("usage", {})
+                db.update_response(response_id, "completed", usage=usage, metadata=metadata)
+
+                final_response = db.get_response(response_id)
                 web.header('Content-Type', 'application/json')
                 return json.dumps(final_response)
 
