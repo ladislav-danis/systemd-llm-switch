@@ -1,6 +1,6 @@
 [Unit]
 # Description of the service
-Description=Llama-CPP Server (Qwen3-Thinking-30B-A3B-8GB)
+Description=Llama-CPP Server (Qwen3.5-Thinking-35B-A3B-8GB)
 # Service should start after network and nvidia services are available
 After=network.target
 After=network.target nvidia-persistenced.service
@@ -11,20 +11,22 @@ WorkingDirectory={{LLAMA_BIN_DIR}}
 
 # Main command to start the llama-server with various parameters
 ExecStart={{LLAMA_SERVER_PATH}} \
---model {{MODELS_DIR}}/unsloth_Qwen3-30B-A3B-Thinking-2507-GGUF_Qwen3-30B-A3B-Thinking-2507-UD-Q8_K_XL.gguf \
+--model {{MODELS_DIR}}/unsloth_Qwen3.5-35B-A3B-GGUF_Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf \
+--mmproj {{MODELS_DIR}}/unsloth_Qwen3.5-35B-A3B-GGUF_mmproj-BF16.gguf \
 --threads 3 \
 -np 1 \
---batch-size 512 \
---ubatch-size 512 \
---ctx-size 32768 \
+--batch-size 2560 \
+--ubatch-size 2560 \
+--ctx-size 81920 \
 --cache-type-k q8_0 \
 --cache-type-v q8_0 \
 --jinja \
---temp 0.6 --min-p 0.00 --top-p 0.95 --top-k 20 --repeat-penalty 1.0 --presence_penalty 1.0 \
+--seed 32 \
+--temp 0.6 --min-p 0.00 --top-p 0.95 --top-k 20 \
 --flash-attn on \
--a qwen3-thinking-30-a3b-8gb \
+-a qwen3.5-thinking \
 --n-gpu-layers 49 \
---override-tensor ".*blk\.([3-9]|[1-3][0-9]|4[0-8])\.ffn_.*_exps.*=CPU" \
+--override-tensor ".*blk\.([0-9]|[1-3][0-9]|4[0-8])\.ffn_.*_exps.*=CPU" \
 --host 0.0.0.0 \
 --port 3004
 
