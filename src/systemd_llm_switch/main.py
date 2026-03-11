@@ -9,6 +9,7 @@ import sys
 import logging
 import base64
 import uuid
+import queue
 from json_repair import repair_json
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -157,18 +158,19 @@ def run_systemctl_user(
 urls = (
     '/v1/chat/completions', 'ChatProxy',
     '/v1/embeddings', 'EmbeddingsProxy',
+    '/v1/models/([^/]+)', 'ModelDetail',
     '/v1/models', 'ListModels',
-    '/v1/conversations', 'ConversationsHandler',
-    '/v1/conversations/([^/]+)/items', 'ConversationItemsHandler',
     '/v1/conversations/([^/]+)/items/([^/]+)', 'ConversationItemDetailHandler',
+    '/v1/conversations/([^/]+)/items', 'ConversationItemsHandler',
     '/v1/conversations/([^/]+)', 'ConversationsDetailHandler',
-    '/v1/responses', 'ResponsesHandler',
+    '/v1/conversations', 'ConversationsHandler',
     '/v1/responses/input_tokens', 'ResponsesInputTokensHandler',
     '/v1/responses/compact', 'ResponsesCompactHandler',
-    '/v1/responses/([^/]+)', 'ResponsesDetailHandler',
     '/v1/responses/([^/]+)/items', 'ResponsesItemsHandler',
     '/v1/responses/([^/]+)/input_items', 'ResponsesInputItemsHandler',
-    '/v1/responses/([^/]+)/cancel', 'ResponsesCancelHandler'
+    '/v1/responses/([^/]+)/cancel', 'ResponsesCancelHandler',
+    '/v1/responses/([^/]+)', 'ResponsesDetailHandler',
+    '/v1/responses', 'ResponsesHandler',
 )
 
 
@@ -272,135 +274,113 @@ class ChatProxy:
             return False
 
     def POST(self):
-        """Processes incoming chat completions requests.
-
-        Switches to the requested model, forwards the request to the active
-        llama.cpp backend, and handles response formatting including JSON
-        repair for malformed tool call arguments.
-
-        Args:
-            None. Reads request data from web.ctx.
-
-        Returns:
-            JSON string or generator for the response body.
-
-        Raises:
-           web.ctx.status: Set to "400 Bad Request" for invalid JSON,
-                "500 Internal Server Error" for activation failures.
-        """
+        """Processes incoming chat completions requests."""
         try:
-            # Reading JSON data from the request body
             raw_body = web.data()
             if not raw_body:
                 web.ctx.status = "400 Bad Request"
                 return json.dumps({"error": "No data provided"})
 
             data = json.loads(raw_body)
-            # Check if the client requested streaming
             client_wants_stream = data.get("stream", False)
-            
-            # Force stream=False to ensure we can parse and repair the response
-            # regardless of client settings.
             data["stream"] = False
             target_model = data.get("model")
 
             logging.info(f"Model request accepted: {target_model}")
 
-            # Attempt to switch models
             if not ChatProxy.switch_model(target_model):
                 web.ctx.status = "500 Internal Server Error"
-                return json.dumps(
-                    {"error": f"Failed to activate model {target_model}"}
-                )
+                return json.dumps({"error": f"Failed to activate model {target_model}"})
 
-            # Forwarding the request to the llama.cpp backend
-            # Always use stream=False here because we forced
-            # data["stream"] = False
-            resp = requests.post(
-                f"{LLAMA_URL}/v1/chat/completions",
-                json=data,
-                stream=False,
-                timeout=(10, 1800)
-            )
+            if client_wants_stream:
+                web.header('Content-Type', 'text/event-stream')
+                web.header('Cache-Control', 'no-cache')
+                web.header('Connection', 'keep-alive')
+                web.header('X-Accel-Buffering', 'no')
 
-            raw_resp_content = resp.content
-            try:
-                resp_data = resp.json()
-                # If it's a chat completion, try to repair the content
-                choices = resp_data.get("choices", [])
-                if choices:
-                    message = resp_data["choices"][0].get("message", {})
-
-                    # 1. Ensure content is null if tool_calls present
-                    #    (standard OpenAI)
-                    tool_calls = message.get("tool_calls", [])
-                    if tool_calls and not message.get("content"):
-                        message["content"] = None
-
-                    # 2. Repair tool_calls arguments if present
-                    repair_tool_calls(tool_calls)
-                
-                log_trace(raw_body, raw_resp_content, resp_data)
-
-                if client_wants_stream:
-                    # Client requested a stream, so we must fake an SSE stream
-                    web.header('Content-Type', 'text/event-stream')
-                    web.header('Cache-Control', 'no-cache')
-                    web.header('Connection', 'keep-alive')
-                    web.header('X-Accel-Buffering', 'no')
-
-                    def fake_stream(repaired_data):
-                        # Convert chat.completion to chat.completion.chunk
-                        chunk_data = repaired_data.copy()
-                        chunk_data["object"] = "chat.completion.chunk"
-                        
-                        if (
-                            "choices" in chunk_data
-                            and len(chunk_data["choices"]) > 0
-                        ):
-                            choice = chunk_data["choices"][0]
-                            if "message" in choice:
-                                choice["delta"] = choice.pop("message")
-                                # OpenAI stream format for tool_calls
-                                # uses index
-                                if "tool_calls" in choice["delta"]:
-                                    for i, tc in enumerate(
-                                        choice["delta"]["tool_calls"]
-                                    ):
-                                        tc["index"] = i
-
-                        yield (
-                            f"data: {json.dumps(chunk_data)}\n\n"
-                        ).encode('utf-8')
-                        yield b"data: [DONE]\n\n"
-
-                    return fake_stream(resp_data)
-                else:
-                    # Classic JSON response
-                    web.header('Content-Type', 'application/json')
-                    return json.dumps(resp_data)
+                def chat_stream_handler():
+                    # Send initial comment to keep connection alive
+                    yield b": keep-alive\n\n"
                     
-            except Exception as e:
-                logging.warning(
-                    "Could not parse or repair backend response: %s", e
-                )
-                log_trace(
-                    raw_body,
-                    raw_resp_content,
-                    f"ERROR: {e}\nORIGINAL CONTENT: "
-                    f"{raw_resp_content.decode('utf-8', errors='replace')}",
-                )
-                return resp.content
+                    q = queue.Queue()
+                    def fetch_backend():
+                        try:
+                            resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json=data, timeout=(10, 1800))
+                            q.put(resp)
+                        except Exception as e:
+                            q.put(e)
 
-        except json.JSONDecodeError:
-            web.ctx.status = "400 Bad Request"
-            return json.dumps({"error": "Invalid JSON"})
+                    t = threading.Thread(target=fetch_backend)
+                    t.start()
+
+                    # Wait for thread with heartbeats
+                    while t.is_alive():
+                        yield b": keep-alive\n\n"
+                        try:
+                            result = q.get(timeout=2)
+                            break
+                        except queue.Empty:
+                            continue
+                    else:
+                        result = q.get()
+
+                    if isinstance(result, Exception):
+                        yield f"data: {json.dumps({'error': str(result)})}\n\n".encode('utf-8')
+                        return
+
+                    if result.status_code != 200:
+                        yield f"data: {json.dumps({'error': 'Backend error'})}\n\n".encode('utf-8')
+                        return
+
+                    resp_data = result.json()
+                    choices = resp_data.get("choices", [])
+                    if choices:
+                        message = choices[0].get("message", {})
+                        repair_tool_calls(message.get("tool_calls", []))
+                    
+                    log_trace(raw_body, result.content, resp_data)
+
+                    chunk_data = resp_data.copy()
+                    chunk_data["object"] = "chat.completion.chunk"
+                    if choices:
+                        choice = chunk_data["choices"][0]
+                        if "message" in choice:
+                            choice["delta"] = choice.pop("message")
+                    
+                    yield f"data: {json.dumps(chunk_data)}\n\n".encode('utf-8')
+                    yield b"data: [DONE]\n\n"
+
+                return chat_stream_handler()
+            else:
+                resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json=data, timeout=(10, 1800))
+                resp_data = resp.json()
+                if "choices" in resp_data:
+                    repair_tool_calls(resp_data["choices"][0].get("message", {}).get("tool_calls", []))
+                log_trace(raw_body, resp.content, resp_data)
+                web.header('Content-Type', 'application/json')
+                return json.dumps(resp_data)
+
         except Exception as e:
-            logging.error(
-                f"Unexpected error in POST handler: {e}", exc_info=True
-                )
+            logging.error(f"Error in ChatProxy: {e}", exc_info=True)
             web.ctx.status = "500 Internal Server Error"
             return json.dumps({"error": str(e)})
+
+
+class ModelDetail:
+    """Endpoint for retrieving details of a specific model."""
+    def GET(self, model_id):
+        if model_id not in MODELS:
+            web.ctx.status = "404 Not Found"
+            return json.dumps({"error": "Model not found"})
+        
+        web.header('Content-Type', 'application/json')
+        return json.dumps({
+            "id": model_id,
+            "object": "model",
+            "owned_by": "organization",
+            "created": int(time.time()),
+            "capabilities": {"embeddings": model_id == "bge-m3"}
+        })
 
 
 class ListModels:
@@ -419,66 +399,34 @@ class ListModels:
 
 class EmbeddingsProxy:
     """Proxy handler for processing embedding requests."""
-
     def POST(self):
         try:
             raw_body = web.data()
-            if not raw_body:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "No data provided"})
-
             data = json.loads(raw_body)
             target_model = data.get("model")
-
             if not target_model:
                 web.ctx.status = "400 Bad Request"
                 return json.dumps({"error": "Model is required"})
 
-            # Attempt to switch models
             if not ChatProxy.switch_model(target_model):
                 web.ctx.status = "500 Internal Server Error"
-                return json.dumps(
-                    {"error": f"Failed to activate model {target_model}"}
-                )
+                return json.dumps({"error": f"Failed to activate model {target_model}"})
 
-            # Forwarding the request to the llama.cpp backend
-            resp = requests.post(
-                f"{LLAMA_URL}/v1/embeddings",
-                json=data,
-                timeout=(10, 600)
-            )
-
+            resp = requests.post(f"{LLAMA_URL}/v1/embeddings", json=data, timeout=(10, 600))
             if resp.status_code != 200:
                 web.ctx.status = f"{resp.status_code} {resp.reason}"
                 return resp.content
 
-            # Parse and ensure 100% OpenAI compliance
-            try:
-                resp_data = resp.json()
-                if "data" in resp_data:
-                    for i, item in enumerate(resp_data["data"]):
-                        if "object" not in item:
-                            item["object"] = "embedding"
-                        if "index" not in item:
-                            item["index"] = i
-                
-                # Ensure object is "list"
-                if "object" not in resp_data:
-                    resp_data["object"] = "list"
-                
-                # Ensure model name matches requested one
-                resp_data["model"] = target_model
+            resp_data = resp.json()
+            if "data" in resp_data:
+                for i, item in enumerate(resp_data["data"]):
+                    item.setdefault("object", "embedding")
+                    item.setdefault("index", i)
+            resp_data.setdefault("object", "list")
+            resp_data["model"] = target_model
 
-                web.header('Content-Type', 'application/json')
-                return json.dumps(resp_data)
-            except Exception:
-                # Fallback to raw content if parsing fails
-                web.header('Content-Type', 'application/json')
-                return resp.content
-
-        except json.JSONDecodeError:
-            web.ctx.status = "400 Bad Request"
-            return json.dumps({"error": "Invalid JSON"})
+            web.header('Content-Type', 'application/json')
+            return json.dumps(resp_data)
         except Exception as e:
             logging.error(f"Error in EmbeddingsProxy: {e}")
             web.ctx.status = "500 Internal Server Error"
@@ -487,32 +435,17 @@ class EmbeddingsProxy:
 
 class ConversationsHandler:
     """Handler for managing conversation creation."""
-    
     def POST(self):
         try:
             raw_body = web.data()
             data = json.loads(raw_body) if raw_body else {}
-            metadata = data.get("metadata", {})
-            items = data.get("items", [])
-            
-            conv_id = db.create_conversation(metadata=metadata)
-            
-            # Bootstrap items if provided
-            for item in items:
+            conv_id = db.create_conversation(metadata=data.get("metadata", {}))
+            for item in data.get("items", []):
                 if item.get("type") == "message":
-                    # Extract text content (can be string or list of objects in OpenAI spec)
-                    content = item.get("content")
-                    db.add_item(
-                        conv_id,
-                        None,
-                        "message",
-                        item.get("role", "user"),
-                        content
-                    )
+                    db.add_item(conv_id, None, "message", item.get("role", "user"), item.get("content"))
             
-            conv_obj = db.get_conversation(conv_id)
             web.header('Content-Type', 'application/json')
-            return json.dumps(conv_obj)
+            return json.dumps(db.get_conversation(conv_id))
         except Exception as e:
             logging.error(f"Error in ConversationsHandler: {e}")
             web.ctx.status = "500 Internal Server Error"
@@ -521,251 +454,106 @@ class ConversationsHandler:
 
 class ConversationsDetailHandler:
     """Handler for retrieving, updating or deleting a specific conversation."""
-    
     def GET(self, conversation_id):
-        try:
-            conv_obj = db.get_conversation(conversation_id)
-            if not conv_obj:
-                web.ctx.status = "404 Not Found"
-                return json.dumps({"error": "Conversation not found"})
-            
-            web.header('Content-Type', 'application/json')
-            return json.dumps(conv_obj)
-        except Exception as e:
-            logging.error(f"Error in ConversationsDetailHandler (GET): {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        conv = db.get_conversation(conversation_id)
+        if not conv:
+            web.ctx.status = "404 Not Found"
+            return json.dumps({"error": "Conversation not found"})
+        web.header('Content-Type', 'application/json')
+        return json.dumps(conv)
 
     def POST(self, conversation_id):
-        """Update conversation metadata."""
-        try:
-            raw_body = web.data()
-            if not raw_body:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "No data provided"})
-            
-            data = json.loads(raw_body)
-            metadata = data.get("metadata")
-            
-            if metadata is None:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "metadata is required for update"})
-            
-            if db.update_conversation(conversation_id, metadata):
-                conv_obj = db.get_conversation(conversation_id)
-                web.header('Content-Type', 'application/json')
-                return json.dumps(conv_obj)
-            else:
-                web.ctx.status = "404 Not Found"
-                return json.dumps({"error": "Conversation not found"})
-        except Exception as e:
-            logging.error(f"Error in ConversationsDetailHandler (POST/Update): {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        raw_body = web.data()
+        data = json.loads(raw_body)
+        if db.update_conversation(conversation_id, data.get("metadata", {})):
+            web.header('Content-Type', 'application/json')
+            return json.dumps(db.get_conversation(conversation_id))
+        web.ctx.status = "404 Not Found"
+        return json.dumps({"error": "Conversation not found"})
 
     def DELETE(self, conversation_id):
-        try:
-            if db.delete_conversation(conversation_id):
-                web.header('Content-Type', 'application/json')
-                return json.dumps({
-                    "id": conversation_id,
-                    "object": "conversation.deleted",
-                    "deleted": True
-                })
-            else:
-                web.ctx.status = "404 Not Found"
-                return json.dumps({"error": "Conversation not found"})
-        except Exception as e:
-            logging.error(f"Error in ConversationsDetailHandler (DELETE): {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        if db.delete_conversation(conversation_id):
+            web.header('Content-Type', 'application/json')
+            return json.dumps({"id": conversation_id, "object": "conversation.deleted", "deleted": True})
+        web.ctx.status = "404 Not Found"
+        return json.dumps({"error": "Conversation not found"})
 
 
 class ConversationItemsHandler:
     """Handler for listing or creating items within a conversation."""
-    
     def GET(self, conversation_id):
-        try:
-            params = web.input(limit=20, after=None, order="desc")
-            limit = int(params.limit)
-            after = params.after
-            order = params.order
-            
-            items = db.get_conversation_items(conversation_id, limit=limit, after=after, order=order)
-            
-            web.header('Content-Type', 'application/json')
-            return json.dumps({
-                "object": "list",
-                "data": items,
-                "has_more": len(items) == limit
-            })
-        except Exception as e:
-            logging.error(f"Error in ConversationItemsHandler (GET): {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        params = web.input(limit=20, after=None, order="desc")
+        items = db.get_conversation_items(conversation_id, limit=int(params.limit), after=params.after, order=params.order)
+        web.header('Content-Type', 'application/json')
+        return json.dumps({"object": "list", "data": items, "has_more": len(items) == int(params.limit)})
 
     def POST(self, conversation_id):
-        """Add items to a conversation."""
-        try:
-            raw_body = web.data()
-            if not raw_body:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "No data provided"})
-            
-            data = json.loads(raw_body)
-            items_to_add = data.get("items", [])
-            
-            # Verify conversation exists
-            if not db.get_conversation(conversation_id):
-                web.ctx.status = "404 Not Found"
-                return json.dumps({"error": "Conversation not found"})
-            
-            added_items = []
-            for item_data in items_to_add:
-                item_type = item_data.get("type")
-                if item_type == "message":
-                    role = item_data.get("role", "user")
-                    content = item_data.get("content")
-                    item_id = db.add_item(conversation_id, None, "message", role, content)
-                    added_items.append(db.get_item(item_id))
-                # Add other types if needed (function_call, etc.)
-            
-            web.header('Content-Type', 'application/json')
-            return json.dumps({
-                "object": "list",
-                "data": added_items,
-                "has_more": False
-            })
-        except Exception as e:
-            logging.error(f"Error in ConversationItemsHandler (POST): {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        data = json.loads(web.data())
+        added = []
+        for item_data in data.get("items", []):
+            if item_data.get("type") == "message":
+                item_id = db.add_item(conversation_id, None, "message", item_data.get("role", "user"), item_data.get("content"))
+                added.append(db.get_item(item_id))
+        web.header('Content-Type', 'application/json')
+        return json.dumps({"object": "list", "data": added, "has_more": False})
 
 
 class ConversationItemDetailHandler:
-    """Handler for retrieving or deleting a specific conversation item."""
-    
     def GET(self, conversation_id, item_id):
-        try:
-            item = db.get_item(item_id)
-            if not item:
-                web.ctx.status = "404 Not Found"
-                return json.dumps({"error": "Item not found"})
-            
-            web.header('Content-Type', 'application/json')
-            return json.dumps(item)
-        except Exception as e:
-            logging.error(f"Error in ConversationItemDetailHandler (GET): {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        item = db.get_item(item_id)
+        if not item:
+            web.ctx.status = "404 Not Found"
+            return json.dumps({"error": "Item not found"})
+        web.header('Content-Type', 'application/json')
+        return json.dumps(item)
 
     def DELETE(self, conversation_id, item_id):
-        try:
-            if db.delete_item(item_id):
-                # Return the parent conversation object as per spec
-                conv_obj = db.get_conversation(conversation_id)
-                web.header('Content-Type', 'application/json')
-                return json.dumps(conv_obj)
-            else:
-                web.ctx.status = "404 Not Found"
-                return json.dumps({"error": "Item not found"})
-        except Exception as e:
-            logging.error(f"Error in ConversationItemDetailHandler (DELETE): {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        if db.delete_item(item_id):
+            web.header('Content-Type', 'application/json')
+            return json.dumps(db.get_conversation(conversation_id))
+        web.ctx.status = "404 Not Found"
+        return json.dumps({"error": "Item not found"})
 
 
 class ResponsesHandler:
     """Proxy handler for the stateful OpenAI Responses API."""
-    
     def POST(self):
         try:
             raw_body = web.data()
-            if not raw_body:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "No data provided"})
-
             data = json.loads(raw_body)
-            # Check if the client requested streaming
             client_wants_stream = data.get("stream", False)
-            
             target_model = data.get("model")
-            conversation_id = data.get("conversation") or data.get("conversation_id")
-            previous_response_id = data.get("previous_response_id")
+            conv_id = data.get("conversation") or data.get("conversation_id")
+            prev_resp_id = data.get("previous_response_id")
             input_items = data.get("input", [])
             instructions = data.get("instructions")
             metadata = data.get("metadata", {})
 
-            if not target_model:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "Model is required"})
-
-            # Ensure model is switched (VRAM management)
-            if not ChatProxy.switch_model(target_model):
+            if not target_model or not ChatProxy.switch_model(target_model):
                 web.ctx.status = "500 Internal Server Error"
-                return json.dumps(
-                    {"error": f"Failed to activate model {target_model}"}
-                )
+                return json.dumps({"error": f"Failed to activate model {target_model}"})
 
-            # 1. State Management: Create or retrieve conversation
-            if not conversation_id:
-                conversation_id = db.create_conversation()
+            if not conv_id:
+                conv_id = db.create_conversation()
             
-            # 2. Add input items to SQLite and prepare for backend
             current_messages = []
             for item in input_items:
-                item_type = item.get("type")
-                if item_type == "input_text":
-                    text_content = item.get("text")
-                    db.add_item(
-                        conversation_id, 
-                        None, 
-                        "message", 
-                        "user", 
-                        {"text": text_content}
-                    )
-                    current_messages.append({"role": "user", "content": text_content})
-                elif item_type == "function_call_output":
-                    call_id = item.get("call_id")
-                    output = item.get("output")
-                    db.add_item(
-                        conversation_id,
-                        None,
-                        "tool",
-                        "tool",
-                        {
-                            "tool_call_id": call_id,
-                            "content": output
-                        }
-                    )
-                    current_messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": output
-                    })
-                elif item_type == "compaction":
-                    # Handle compaction items by injecting their content into the history
-                    content = item.get("encrypted_content", "")
+                itype = item.get("type")
+                if itype == "input_text":
+                    db.add_item(conv_id, None, "message", "user", {"text": item.get("text")})
+                    current_messages.append({"role": "user", "content": item.get("text")})
+                elif itype == "function_call_output":
+                    db.add_item(conv_id, None, "tool", "tool", {"tool_call_id": item.get("call_id"), "content": item.get("output")})
+                    current_messages.append({"role": "tool", "tool_call_id": item.get("call_id"), "content": item.get("output")})
+                elif itype == "compaction":
                     try:
-                        summary = base64.b64decode(content).decode('utf-8')
+                        summary = base64.b64decode(item.get("encrypted_content", "")).decode('utf-8')
                     except Exception:
-                        summary = content
-                    
-                    current_messages.append({
-                        "role": "system", 
-                        "content": f"Previous conversation summary: {summary}"
-                    })
+                        summary = item.get("encrypted_content", "")
+                    current_messages.append({"role": "system", "content": f"Previous conversation summary: {summary}"})
 
-            # 3. Create response object in DB (initial state)
-            response_id = db.create_response(
-                conversation_id, 
-                target_model, 
-                status="in_progress",
-                instructions=instructions,
-                metadata=metadata
-            )
+            resp_id = db.create_response(conv_id, target_model, status="in_progress", instructions=instructions, metadata=metadata)
 
-            # 4. Prepare for streaming or sync response
             if client_wants_stream:
                 web.header('Content-Type', 'text/event-stream')
                 web.header('Cache-Control', 'no-cache')
@@ -776,222 +564,92 @@ class ResponsesHandler:
                     def sse(event, data_obj):
                         return f"event: {event}\ndata: {json.dumps(data_obj)}\n\n".encode('utf-8')
 
-                    # Immediately yield created event to keep connection alive
-                    initial_response = db.get_response(response_id)
-                    yield sse("response.created", initial_response)
-
-                    # --- HEAVY LIFTING STARTS HERE ---
-                    # 5. Reconstruct history for the backend
-                    history = db.get_conversation_history(
-                        conversation_id, 
-                        up_to_response_id=previous_response_id
-                    )
+                    yield sse("response.created", db.get_response(resp_id))
                     
-                    # If we are branching, the fetched history ends at previous_response_id.
-                    # We must append the CURRENT messages that we just added to the DB.
-                    if previous_response_id:
-                        history.extend(current_messages)
+                    q = queue.Queue()
+                    def fetch_backend():
+                        try:
+                            hist = db.get_conversation_history(conv_id, up_to_response_id=prev_resp_id)
+                            if prev_resp_id: hist.extend(current_messages)
+                            if instructions: hist.insert(0, {"role": "system", "content": instructions})
+                            
+                            tools = []
+                            for t in data.get("tools", []):
+                                if t.get("type") == "function":
+                                    tools.append({"type": "function", "function": {"name": t.get("name"), "description": t.get("description", ""), "parameters": t.get("parameters", {})}})
+                            
+                            payload = {"model": target_model, "messages": hist, "stream": False}
+                            if tools: payload["tools"] = tools
+                            q.put(requests.post(f"{LLAMA_URL}/v1/chat/completions", json=payload, timeout=(10, 1800)))
+                        except Exception as e:
+                            q.put(e)
+
+                    t = threading.Thread(target=fetch_backend)
+                    t.start()
+
+                    while t.is_alive():
+                        yield b": keep-alive\n\n"
+                        try:
+                            result = q.get(timeout=2)
+                            break
+                        except queue.Empty:
+                            continue
+                    else:
+                        result = q.get()
+
+                    if isinstance(result, Exception) or result.status_code != 200:
+                        yield sse("error", {"message": str(result)})
+                        return
+
+                    resp_data = result.json()
+                    msg = resp_data["choices"][0].get("message", {})
+                    reasoning = msg.get("reasoning_content")
                     
-                    # Add instructions as system message if present
-                    if instructions:
-                        history.insert(0, {"role": "system", "content": instructions})
+                    if msg.get("content"):
+                        db.add_item(conv_id, resp_id, "message", "assistant", {"text": msg.get("content")})
+                    
+                    t_calls = msg.get("tool_calls", [])
+                    repair_tool_calls(t_calls)
+                    for tc in t_calls:
+                        f = tc.get("function", {})
+                        db.add_item(conv_id, resp_id, "function_call", "assistant", {"call_id": tc.get("id"), "name": f.get("name"), "arguments": f.get("arguments")})
 
-                    # 6. Call backend
-                    backend_tools = []
-                    for tool in data.get("tools", []):
-                        if tool.get("type") == "function":
-                            backend_tools.append({
-                                "type": "function",
-                                "function": {
-                                    "name": tool.get("name"),
-                                    "description": tool.get("description", ""),
-                                    "parameters": tool.get("parameters", {})
-                                }
-                            })
+                    db.update_response(resp_id, "completed", usage=resp_data.get("usage", {}), metadata=metadata)
+                    final_obj = db.get_response(resp_id)
 
-                    backend_payload = {
-                        "model": target_model,
-                        "messages": history,
-                        "stream": False
-                    }
-                    if backend_tools:
-                        backend_payload["tools"] = backend_tools
-
-                    try:
-                        resp = requests.post(
-                            f"{LLAMA_URL}/v1/chat/completions",
-                            json=backend_payload,
-                            timeout=(10, 1800)
-                        )
-                        
-                        if resp.status_code != 200:
-                            yield sse("error", {"message": f"Backend error: {resp.status_code}", "type": "backend_error"})
-                            return
-
-                        resp_data = resp.json()
-                        backend_msg = resp_data["choices"][0].get("message", {})
-                        reasoning = backend_msg.get("reasoning_content")
-                        
-                        # Store output items
-                        # Handle text content
-                        assistant_content = backend_msg.get("content")
-                        if assistant_content:
-                            db.add_item(
-                                conversation_id, 
-                                response_id, 
-                                "message", 
-                                "assistant", 
-                                {"text": assistant_content}
-                            )
-                        
-                        # Handle tool calls
-                        tool_calls = backend_msg.get("tool_calls", [])
-                        repair_tool_calls(tool_calls)
-                        for tc in tool_calls:
-                            func = tc.get("function", {})
-                            db.add_item(
-                                conversation_id,
-                                response_id,
-                                "function_call",
-                                "assistant",
-                                {
-                                    "call_id": tc.get("id"),
-                                    "name": func.get("name"),
-                                    "arguments": func.get("arguments")
-                                }
-                            )
-
-                        # Finalize response object in DB
-                        usage = resp_data.get("usage", {})
-                        db.update_response(
-                            response_id, 
-                            "completed", 
-                            usage=usage,
-                            metadata=metadata
-                        )
-
-                        # Fetch final response for stream envelopes
-                        final_response_obj = db.get_response(response_id)
-
-                        # 7. Emit granular stream events
-                        for out_idx, item in enumerate(final_response_obj.get("output", [])):
-                            yield sse("response.output_item.added", {"item": item})
-                            
-                            if item["type"] == "message":
-                                for part_idx, part in enumerate(item.get("content", [])):
-                                    yield sse("response.content_part.added", {
-                                        "response_id": response_id,
-                                        "output_index": out_idx,
-                                        "content_index": part_idx,
-                                        "part": part
-                                    })
-                                    
-                                    if part["type"] == "output_text":
-                                        if reasoning:
-                                            yield sse("response.reasoning.delta", {
-                                                "response_id": response_id,
-                                                "output_index": out_idx,
-                                                "content_index": part_idx,
-                                                "delta": reasoning
-                                            })
-                                        yield sse("response.text.delta", {
-                                            "response_id": response_id,
-                                            "output_index": out_idx,
-                                            "content_index": part_idx,
-                                            "delta": part["text"]
-                                        })
-                                    
-                                    yield sse("response.content_part.done", {
-                                        "response_id": response_id,
-                                        "output_index": out_idx,
-                                        "content_index": part_idx,
-                                        "part": part
-                                    })
-                            
-                            elif item["type"] == "function_call":
-                                yield sse("response.function_call.arguments.delta", {
-                                    "response_id": response_id,
-                                    "output_index": out_idx,
-                                    "call_id": item.get("call_id"),
-                                    "delta": item.get("arguments")
-                                })
-
-                            yield sse("response.output_item.done", {"item": item})
-                        
-                        yield sse("response.done", {"response": final_response_obj})
-                        yield b"data: [DONE]\n\n"
-
-                    except Exception as e:
-                        logging.error(f"Stream error: {e}", exc_info=True)
-                        yield sse("error", {"message": str(e), "type": "internal_error"})
+                    for out_idx, item in enumerate(final_obj.get("output", [])):
+                        yield sse("response.output_item.added", {"item": item})
+                        if item["type"] == "message":
+                            for p_idx, part in enumerate(item.get("content", [])):
+                                yield sse("response.content_part.added", {"response_id": resp_id, "output_index": out_idx, "content_index": p_idx, "part": part})
+                                if part["type"] == "output_text":
+                                    if reasoning: yield sse("response.reasoning.delta", {"response_id": resp_id, "output_index": out_idx, "content_index": p_idx, "delta": reasoning})
+                                    yield sse("response.text.delta", {"response_id": resp_id, "output_index": out_idx, "content_index": p_idx, "delta": part["text"]})
+                                yield sse("response.content_part.done", {"response_id": resp_id, "output_index": out_idx, "content_index": p_idx, "part": part})
+                        elif item["type"] == "function_call":
+                            yield sse("response.function_call.arguments.delta", {"response_id": resp_id, "output_index": out_idx, "call_id": item.get("call_id"), "delta": item.get("arguments")})
+                        yield sse("response.output_item.done", {"item": item})
+                    
+                    # Send COMPLETED and DONE for multi-client compatibility
+                    yield sse("response.completed", final_obj)
+                    yield sse("response.done", {"response": final_obj})
+                    yield b"data: [DONE]\n\n"
 
                 return response_stream_handler()
-
             else:
-                # --- SYNC MODE (unchanged logic but uses response_id created above) ---
-                # 5. Reconstruct history
-                history = db.get_conversation_history(
-                    conversation_id, 
-                    up_to_response_id=previous_response_id
-                )
-                if previous_response_id:
-                    history.extend(current_messages)
-                if instructions:
-                    history.insert(0, {"role": "system", "content": instructions})
-
-                # 6. Call backend
-                backend_tools = []
-                for tool in data.get("tools", []):
-                    if tool.get("type") == "function":
-                        backend_tools.append({
-                            "type": "function",
-                            "function": {
-                                "name": tool.get("name"),
-                                "description": tool.get("description", ""),
-                                "parameters": tool.get("parameters", {})
-                            }
-                        })
-
-                backend_payload = {
-                    "model": target_model,
-                    "messages": history,
-                    "stream": False
-                }
-                if backend_tools:
-                    backend_payload["tools"] = backend_tools
-
-                resp = requests.post(
-                    f"{LLAMA_URL}/v1/chat/completions",
-                    json=backend_payload,
-                    timeout=(10, 1800)
-                )
+                # Sync mode (simplified)
+                hist = db.get_conversation_history(conv_id, up_to_response_id=prev_resp_id)
+                if prev_resp_id: hist.extend(current_messages)
+                if instructions: hist.insert(0, {"role": "system", "content": instructions})
                 
-                if resp.status_code != 200:
-                    web.ctx.status = f"{resp.status_code} {resp.reason}"
-                    return resp.content
-
+                resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json={"model": target_model, "messages": hist, "stream": False}, timeout=(10, 1800))
                 resp_data = resp.json()
-                backend_msg = resp_data["choices"][0].get("message", {})
-                
-                # Store output items
-                assistant_content = backend_msg.get("content")
-                if assistant_content:
-                    db.add_item(conversation_id, response_id, "message", "assistant", {"text": assistant_content})
-                
-                tool_calls = backend_msg.get("tool_calls", [])
-                repair_tool_calls(tool_calls)
-                for tc in tool_calls:
-                    func = tc.get("function", {})
-                    db.add_item(conversation_id, response_id, "function_call", "assistant", {
-                        "call_id": tc.get("id"), "name": func.get("name"), "arguments": func.get("arguments")
-                    })
-
-                usage = resp_data.get("usage", {})
-                db.update_response(response_id, "completed", usage=usage, metadata=metadata)
-
-                final_response = db.get_response(response_id)
+                msg = resp_data["choices"][0].get("message", {})
+                if msg.get("content"):
+                    db.add_item(conv_id, resp_id, "message", "assistant", {"text": msg.get("content")})
+                db.update_response(resp_id, "completed", usage=resp_data.get("usage", {}), metadata=metadata)
                 web.header('Content-Type', 'application/json')
-                return json.dumps(final_response)
+                return json.dumps(db.get_response(resp_id))
 
         except Exception as e:
             logging.error(f"Error in ResponsesHandler: {e}", exc_info=True)
@@ -1000,205 +658,88 @@ class ResponsesHandler:
 
 
 class ResponsesDetailHandler:
-    """Handler for retrieving or deleting a specific response."""
-    
     def GET(self, response_id):
-        try:
-            response_obj = db.get_response(response_id)
-            if not response_obj:
-                web.ctx.status = "404 Not Found"
-                return json.dumps({"error": "Response not found"})
-            
-            web.header('Content-Type', 'application/json')
-            return json.dumps(response_obj)
-        except Exception as e:
-            logging.error(f"Error in ResponsesDetailHandler (GET): {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        res = db.get_response(response_id)
+        if not res:
+            web.ctx.status = "404 Not Found"
+            return json.dumps({"error": "Response not found"})
+        web.header('Content-Type', 'application/json')
+        return json.dumps(res)
 
     def DELETE(self, response_id):
-        try:
-            success = db.delete_response(response_id)
-            if not success:
-                web.ctx.status = "404 Not Found"
-                return json.dumps({"error": "Response not found"})
-            
+        if db.delete_response(response_id):
             web.header('Content-Type', 'application/json')
             return json.dumps({"id": response_id, "object": "response", "deleted": True})
-        except Exception as e:
-            logging.error(f"Error in ResponsesDetailHandler (DELETE): {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        web.ctx.status = "404 Not Found"
+        return json.dumps({"error": "Response not found"})
 
 
 class ResponsesCompactHandler:
-    """Handler for compacting a conversation."""
-    
     def POST(self):
         try:
-            raw_body = web.data()
-            if not raw_body:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "No data provided"})
-
-            data = json.loads(raw_body)
+            data = json.loads(web.data())
             target_model = data.get("model")
-            input_items = data.get("input", [])
-            
-            if not target_model:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "model is required"})
-
-            if not ChatProxy.switch_model(target_model):
+            if not target_model or not ChatProxy.switch_model(target_model):
                 web.ctx.status = "500 Internal Server Error"
-                return json.dumps({"error": f"Failed to activate model {target_model}"})
+                return json.dumps({"error": "Model activation failed"})
 
             full_text = ""
-            for item in input_items:
-                if isinstance(item, str):
-                    full_text += item + "\n"
+            for item in data.get("input", []):
+                if isinstance(item, str): full_text += item + "\n"
                 elif isinstance(item, dict):
-                    if item.get("type") == "input_text":
-                        full_text += f"User: {item.get('text')}\n"
+                    if item.get("type") == "input_text": full_text += f"User: {item.get('text')}\n"
                     elif item.get("role") == "assistant":
                         content = item.get("content", [])
                         if isinstance(content, list):
                             for c in content:
-                                if c.get("type") == "output_text":
-                                    full_text += f"Assistant: {c.get('text')}\n"
-                        elif isinstance(content, str):
-                            full_text += f"Assistant: {content}\n"
+                                if c.get("type") == "output_text": full_text += f"Assistant: {c.get('text')}\n"
+                        elif isinstance(content, str): full_text += f"Assistant: {content}\n"
 
-            summary_prompt = f"Summarize the following conversation concisely for future context:\n\n{full_text}"
-            backend_payload = {
-                "model": target_model,
-                "messages": [{"role": "user", "content": summary_prompt}],
-                "stream": False
-            }
-
-            resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json=backend_payload, timeout=(10, 600))
-            if resp.status_code != 200:
-                web.ctx.status = f"{resp.status_code} {resp.reason}"
-                return resp.content
-
+            resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json={"model": target_model, "messages": [{"role": "user", "content": f"Summarize:\n{full_text}"}], "stream": False}, timeout=(10, 600))
             summary = resp.json()["choices"][0]["message"]["content"]
-            encoded_summary = base64.b64encode(summary.encode('utf-8')).decode('utf-8')
-
-            result = {
-                "id": f"resp_{uuid.uuid4().hex[:12]}",
-                "object": "response",
-                "created_at": int(time.time()),
-                "model": target_model,
-                "status": "completed",
-                "output": [
-                    {
-                        "id": f"cmp_{uuid.uuid4().hex[:12]}",
-                        "type": "compaction",
-                        "encrypted_content": encoded_summary
-                    }
-                ],
-                "usage": resp.json().get("usage", {})
-            }
-            
             web.header('Content-Type', 'application/json')
-            return json.dumps(result)
+            return json.dumps({"id": f"resp_{uuid.uuid4().hex[:12]}", "object": "response", "created_at": int(time.time()), "model": target_model, "status": "completed", "output": [{"id": f"cmp_{uuid.uuid4().hex[:12]}", "type": "compaction", "encrypted_content": base64.b64encode(summary.encode()).decode()}], "usage": resp.json().get("usage", {})})
         except Exception as e:
-            logging.error(f"Error in ResponsesCompactHandler: {e}")
+            logging.error(f"Error in compact: {e}")
             web.ctx.status = "500 Internal Server Error"
             return json.dumps({"error": str(e)})
 
 
 class ResponsesItemsHandler:
-    """Handler for listing output items of a specific response."""
-    
     def GET(self, response_id):
-        try:
-            items = db.get_response_items(response_id)
-            web.header('Content-Type', 'application/json')
-            return json.dumps({"object": "list", "data": items, "has_more": False})
-        except Exception as e:
-            logging.error(f"Error in ResponsesItemsHandler: {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        items = db.get_response_items(response_id)
+        web.header('Content-Type', 'application/json')
+        return json.dumps({"object": "list", "data": items, "has_more": False})
 
 
 class ResponsesInputItemsHandler:
-    """Handler for listing input items of a specific response."""
-    
     def GET(self, response_id):
-        try:
-            response_obj = db.get_response(response_id)
-            if not response_obj:
-                web.ctx.status = "404 Not Found"
-                return json.dumps({"error": "Response not found"})
-            
-            conv_id = response_obj["conversation_id"]
-            history = db.get_conversation_history(conv_id, up_to_response_id=response_id)
-            
-            items = []
-            for i, msg in enumerate(history):
-                items.append({
-                    "id": f"input_item_{response_id}_{i}",
-                    "object": "item",
-                    "type": "message",
-                    "role": msg["role"],
-                    "content": [{"type": "output_text", "text": msg["content"]}]
-                })
-
-            web.header('Content-Type', 'application/json')
-            return json.dumps({"object": "list", "data": items, "has_more": False})
-        except Exception as e:
-            logging.error(f"Error in ResponsesInputItemsHandler: {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        res = db.get_response(response_id)
+        if not res:
+            web.ctx.status = "404 Not Found"
+            return json.dumps({"error": "Response not found"})
+        history = db.get_conversation_history(res["conversation_id"], up_to_response_id=response_id)
+        items = [{"id": f"input_{response_id}_{i}", "object": "item", "type": "message", "role": m["role"], "content": [{"type": "output_text", "text": m["content"]}]} for i, m in enumerate(history)]
+        web.header('Content-Type', 'application/json')
+        return json.dumps({"object": "list", "data": items, "has_more": False})
 
 
 class ResponsesInputTokensHandler:
-    """Handler for counting input tokens."""
-    
     def POST(self):
-        try:
-            raw_body = web.data()
-            if not raw_body:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "No data provided"})
-
-            data = json.loads(raw_body)
-            input_items = data.get("input", [])
-            total_chars = 0
-            for item in input_items:
-                if isinstance(item, dict) and item.get("type") == "input_text":
-                    total_chars += len(item.get("text", ""))
-            
-            result = {
-                "object": "response.input_tokens",
-                "input_tokens": total_chars // 4
-            }
-            
-            web.header('Content-Type', 'application/json')
-            return json.dumps(result)
-        except Exception as e:
-            logging.error(f"Error in ResponsesInputTokensHandler: {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        data = json.loads(web.data())
+        total = sum(len(i.get("text", "")) for i in data.get("input", []) if isinstance(i, dict))
+        web.header('Content-Type', 'application/json')
+        return json.dumps({"object": "response.input_tokens", "input_tokens": total // 4})
 
 
 class ResponsesCancelHandler:
-    """Handler for canceling a specific response."""
-    
     def POST(self, response_id):
-        try:
-            response_obj = db.get_response(response_id)
-            if not response_obj:
-                web.ctx.status = "404 Not Found"
-                return json.dumps({"error": "Response not found"})
-            
-            web.header('Content-Type', 'application/json')
-            return json.dumps(response_obj)
-        except Exception as e:
-            logging.error(f"Error in ResponsesCancelHandler: {e}")
-            web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+        res = db.get_response(response_id)
+        if not res:
+            web.ctx.status = "404 Not Found"
+            return json.dumps({"error": "Response not found"})
+        web.header('Content-Type', 'application/json')
+        return json.dumps(res)
 
 
 app = web.application(urls, globals())
@@ -1207,7 +748,5 @@ if __name__ == "__main__":
     server_port = CONFIG['server']['port']
     server_host = CONFIG['server']['host']
     sys.argv.append(f'{server_host}:{server_port}')
-
     logging.info(f"The proxy server runs on http://{server_host}:{server_port}")
-    logging.info(f"Available models: {', '.join(MODELS.keys())}")
     app.run()
