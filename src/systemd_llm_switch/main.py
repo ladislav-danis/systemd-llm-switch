@@ -158,6 +158,8 @@ urls = (
     '/v1/chat/completions', 'ChatProxy',
     '/v1/embeddings', 'EmbeddingsProxy',
     '/v1/models', 'ListModels',
+    '/v1/conversations', 'ConversationsHandler',
+    '/v1/conversations/([^/]+)', 'ConversationsDetailHandler',
     '/v1/responses', 'ResponsesHandler',
     '/v1/responses/input_tokens', 'ResponsesInputTokensHandler',
     '/v1/responses/compact', 'ResponsesCompactHandler',
@@ -477,6 +479,102 @@ class EmbeddingsProxy:
             return json.dumps({"error": "Invalid JSON"})
         except Exception as e:
             logging.error(f"Error in EmbeddingsProxy: {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class ConversationsHandler:
+    """Handler for managing conversation creation."""
+    
+    def POST(self):
+        try:
+            raw_body = web.data()
+            data = json.loads(raw_body) if raw_body else {}
+            metadata = data.get("metadata", {})
+            items = data.get("items", [])
+            
+            conv_id = db.create_conversation(metadata=metadata)
+            
+            # Bootstrap items if provided
+            for item in items:
+                if item.get("type") == "message":
+                    # Extract text content (can be string or list of objects in OpenAI spec)
+                    content = item.get("content")
+                    db.add_item(
+                        conv_id,
+                        None,
+                        "message",
+                        item.get("role", "user"),
+                        content
+                    )
+            
+            conv_obj = db.get_conversation(conv_id)
+            web.header('Content-Type', 'application/json')
+            return json.dumps(conv_obj)
+        except Exception as e:
+            logging.error(f"Error in ConversationsHandler: {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class ConversationsDetailHandler:
+    """Handler for retrieving, updating or deleting a specific conversation."""
+    
+    def GET(self, conversation_id):
+        try:
+            conv_obj = db.get_conversation(conversation_id)
+            if not conv_obj:
+                web.ctx.status = "404 Not Found"
+                return json.dumps({"error": "Conversation not found"})
+            
+            web.header('Content-Type', 'application/json')
+            return json.dumps(conv_obj)
+        except Exception as e:
+            logging.error(f"Error in ConversationsDetailHandler (GET): {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+    def POST(self, conversation_id):
+        """Update conversation metadata."""
+        try:
+            raw_body = web.data()
+            if not raw_body:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "No data provided"})
+            
+            data = json.loads(raw_body)
+            metadata = data.get("metadata")
+            
+            if metadata is None:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "metadata is required for update"})
+            
+            if db.update_conversation(conversation_id, metadata):
+                conv_obj = db.get_conversation(conversation_id)
+                web.header('Content-Type', 'application/json')
+                return json.dumps(conv_obj)
+            else:
+                web.ctx.status = "404 Not Found"
+                return json.dumps({"error": "Conversation not found"})
+        except Exception as e:
+            logging.error(f"Error in ConversationsDetailHandler (POST/Update): {e}")
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+    def DELETE(self, conversation_id):
+        try:
+            if db.delete_conversation(conversation_id):
+                web.header('Content-Type', 'application/json')
+                return json.dumps({
+                    "id": conversation_id,
+                    "object": "conversation.deleted",
+                    "deleted": True
+                })
+            else:
+                web.ctx.status = "404 Not Found"
+                return json.dumps({"error": "Conversation not found"})
+        except Exception as e:
+            logging.error(f"Error in ConversationsDetailHandler (DELETE): {e}")
             web.ctx.status = "500 Internal Server Error"
             return json.dumps({"error": str(e)})
 

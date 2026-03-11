@@ -258,3 +258,32 @@ class Database:
             cursor = conn.execute("DELETE FROM responses WHERE id = ?", (resp_id,))
             conn.commit()
             return cursor.rowcount > 0
+
+    def get_conversation(self, conversation_id: str) -> Optional[Dict]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row['id'],
+                "object": "conversation",
+                "created_at": row['created_at'],
+                "metadata": json.loads(row['metadata']) if row['metadata'] else {}
+            }
+
+    def update_conversation(self, conversation_id: str, metadata: Dict) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE conversations SET metadata = ? WHERE id = ?",
+                (json.dumps(metadata), conversation_id)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        with self._get_connection() as conn:
+            # Dissociate items as per spec
+            conn.execute("UPDATE items SET conversation_id = NULL WHERE conversation_id = ?", (conversation_id,))
+            cursor = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            conn.commit()
+            return cursor.rowcount > 0
