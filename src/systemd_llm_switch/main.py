@@ -380,7 +380,8 @@ class ChatProxy:
             else:
                 resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json=data, timeout=(10, 1800))
                 resp_data = resp.json()
-                        message = resp_data["choices"][0].get("message", {})
+                if "choices" in resp_data and resp_data["choices"]:
+                    message = resp_data["choices"][0].get("message", {})
                     tcs = message.get("tool_calls", [])
                     if tcs:
                         repair_tool_calls(tcs)
