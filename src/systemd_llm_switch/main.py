@@ -620,113 +620,162 @@ class ResponsesHandler:
                 web.header('X-Accel-Buffering', 'no')
 
                 def response_stream_handler():
+                    # Protocol constants and counters
                     seq_counter = [0]
+                    
                     def sse(event, data_obj):
                         seq_counter[0] += 1
-                        # Create a envelope that matches the Responses API protocol
+                        # The envelope MUST NOT contain a duplicate "type" if data_obj already has it
                         envelope = data_obj.copy()
                         if "type" not in envelope:
                             envelope["type"] = event
-                        if "sequence_number" not in envelope:
-                            envelope["sequence_number"] = seq_counter[0]
                         return f"event: {event}\ndata: {json.dumps(envelope)}\n\n".encode('utf-8')
 
-                    resp_obj = db.get_response(resp_id)
-                    # Protocol requires these fields to be explicitly present
-                    resp_obj["status"] = resp_obj.get("status", "in_progress")
-                    resp_obj["usage"] = resp_obj.get("usage")
-                    resp_obj["error"] = None # Explicitly null if no error
-
-                    yield sse("response.created", resp_obj)
-                    yield sse("response.in_progress", {"response": resp_obj})
-                    
-                    q = queue.Queue()
-                    def fetch_backend():
-                        try:
-                            hist = db.get_conversation_history(conv_id, up_to_response_id=prev_resp_id)
-                            if prev_resp_id: hist.extend(current_messages)
-                            if instructions: hist.insert(0, {"role": "system", "content": instructions})
-                            
-                            tools = []
-                            for t in data.get("tools", []):
-                                if t.get("type") == "function":
-                                    tools.append({"type": "function", "function": {"name": t.get("name"), "description": t.get("description", ""), "parameters": t.get("parameters", {})}})
-                            
-                            payload = {"model": target_model, "messages": hist, "stream": False}
-                            if tools: payload["tools"] = tools
-                            q.put(requests.post(f"{LLAMA_URL}/v1/chat/completions", json=payload, timeout=(10, 1800)))
-                        except Exception as e:
-                            q.put(e)
-
-                    t = threading.Thread(target=fetch_backend)
-                    t.start()
-
-                    last_in_progress_time = time.time()
-                    while t.is_alive():
-                        yield b": keep-alive\n\n"
+                    try:
+                        resp_obj = db.get_response(resp_id)
+                        # Mandatory: response.created
+                        yield sse("response.created", {"response": resp_obj})
                         
-                        now = time.time()
-                        if now - last_in_progress_time >= 2.0:
-                            # Send official in_progress event as a keep-alive
-                            current_resp = db.get_response(resp_id)
-                            yield sse("response.in_progress", {"response": current_resp})
-                            last_in_progress_time = now
-                        else:
-                            # Still send a heartbeat for transport-level keep-alive
-                            yield sse("response.heartbeat", {"response_id": resp_id})
+                        q = queue.Queue()
+                        def fetch_backend():
+                            try:
+                                hist = db.get_conversation_history(conv_id, up_to_response_id=prev_resp_id)
+                                if prev_resp_id: hist.extend(current_messages)
+                                if instructions: hist.insert(0, {"role": "system", "content": instructions})
+                                
+                                tools = []
+                                for t in data.get("tools", []):
+                                    if t.get("type") == "function":
+                                        tools.append({"type": "function", "function": {"name": t.get("name"), "description": t.get("description", ""), "parameters": t.get("parameters", {})}})
+                                
+                                payload = {"model": target_model, "messages": hist, "stream": False}
+                                if tools: payload["tools"] = tools
+                                q.put(requests.post(f"{LLAMA_URL}/v1/chat/completions", json=payload, timeout=(10, 1800)))
+                            except Exception as e:
+                                q.put(e)
+
+                        t = threading.Thread(target=fetch_backend)
+                        t.start()
+
+                        last_heartbeat = time.time()
+                        while t.is_alive():
+                            yield b": keep-alive\n\n"
+                            now = time.time()
+                            if now - last_heartbeat >= 2.0:
+                                yield sse("response.heartbeat", {"response_id": resp_id})
+                                last_heartbeat = now
                             
-                        try:
-                            # Check for result every 1s
-                            result = q.get(timeout=1)
-                            break
-                        except queue.Empty:
-                            continue
-                    else:
-                        result = q.get()
+                            try:
+                                result = q.get(timeout=1)
+                                break
+                            except queue.Empty:
+                                continue
+                        else:
+                            result = q.get()
 
-                    if isinstance(result, Exception) or result.status_code != 200:
-                        error_msg = str(result) if isinstance(result, Exception) else f"Backend error: {result.status_code}"
-                        db.update_response(resp_id, "failed")
-                        fail_obj = db.get_response(resp_id)
-                        fail_obj["error"] = {"message": error_msg}
-                        yield sse("response.completed", fail_obj)
-                        yield sse("error", {"message": error_msg})
-                        return
+                        if isinstance(result, Exception) or result.status_code != 200:
+                            error_msg = str(result) if isinstance(result, Exception) else f"Backend error: {result.status_code}"
+                            db.update_response(resp_id, "failed")
+                            fail_obj = db.get_response(resp_id)
+                            fail_obj["status"] = "failed"
+                            fail_obj["error"] = {"message": error_msg}
+                            yield sse("response.done", {"response": fail_obj})
+                            return
 
-                    resp_data = result.json()
-                    msg = resp_data["choices"][0].get("message", {})
-                    reasoning = msg.get("reasoning_content")
-                    
-                    if msg.get("content"):
-                        db.add_item(conv_id, resp_id, "message", "assistant", {"text": msg.get("content")})
-                    
-                    t_calls = msg.get("tool_calls", [])
-                    repair_tool_calls(t_calls)
-                    for tc in t_calls:
-                        f = tc.get("function", {})
-                        db.add_item(conv_id, resp_id, "function_call", "assistant", {"call_id": tc.get("id"), "name": f.get("name"), "arguments": f.get("arguments")})
+                        resp_data = result.json()
+                        msg = resp_data["choices"][0].get("message", {})
+                        reasoning = msg.get("reasoning_content")
+                        content = msg.get("content")
+                        t_calls = msg.get("tool_calls", [])
+                        repair_tool_calls(t_calls)
 
-                    db.update_response(resp_id, "completed", usage=resp_data.get("usage", {}), metadata=metadata)
-                    final_obj = db.get_response(resp_id)
+                        # Process Output Items (Messages)
+                        if content:
+                            item_id = f"item_{uuid.uuid4().hex[:12]}"
+                            # 1. Item Added
+                            item_obj = {
+                                "id": item_id,
+                                "object": "realtime.item",
+                                "type": "message",
+                                "status": "in_progress",
+                                "role": "assistant",
+                                "content": []
+                            }
+                            yield sse("response.output_item.added", {"response_id": resp_id, "item": item_obj})
+                            
+                            # 2. Content Part Added
+                            part_obj = {"type": "text", "text": ""}
+                            yield sse("response.content_part.added", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
+                            
+                            # 3. Reasoning Delta (if any)
+                            if reasoning:
+                                yield sse("response.content_part.delta", {"response_id": resp_id, "item_id": item_id, "part_index": 0, "delta": {"reasoning_content": reasoning}})
+                            
+                            # 4. Content Part Delta (The actual text)
+                            yield sse("response.content_part.delta", {"response_id": resp_id, "item_id": item_id, "part_index": 0, "delta": {"text": content}})
+                            
+                            # 5. Content Part Done
+                            part_obj["text"] = content
+                            yield sse("response.content_part.done", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
+                            
+                            # 6. Item Done
+                            item_obj["status"] = "completed"
+                            item_obj["content"] = [part_obj]
+                            yield sse("response.output_item.done", {"response_id": resp_id, "item": item_obj})
+                            
+                            # Save to DB
+                            db.add_item(conv_id, resp_id, "message", "assistant", {"text": content})
 
-                    for out_idx, item in enumerate(final_obj.get("output", [])):
-                        yield sse("response.output_item.added", {"item": item})
-                        if item["type"] == "message":
-                            for p_idx, part in enumerate(item.get("content", [])):
-                                yield sse("response.content_part.added", {"response_id": resp_id, "output_index": out_idx, "content_index": p_idx, "part": part})
-                                if part["type"] == "output_text":
-                                    if reasoning: yield sse("response.reasoning.delta", {"response_id": resp_id, "output_index": out_idx, "content_index": p_idx, "delta": reasoning})
-                                    yield sse("response.text.delta", {"response_id": resp_id, "output_index": out_idx, "content_index": p_idx, "delta": part["text"]})
-                                yield sse("response.content_part.done", {"response_id": resp_id, "output_index": out_idx, "content_index": p_idx, "part": part})
-                        elif item["type"] == "function_call":
-                            yield sse("response.function_call.arguments.delta", {"response_id": resp_id, "output_index": out_idx, "call_id": item.get("call_id"), "delta": item.get("arguments")})
-                        yield sse("response.output_item.done", {"item": item})
-                    
-                    # Send COMPLETED and DONE for multi-client compatibility
-                    final_obj["error"] = None
-                    yield sse("response.completed", final_obj)
-                    yield sse("response.done", {"response": final_obj})
-                    yield b"data: [DONE]\n\n"
+                        # Process Output Items (Tool Calls)
+                        for tc in t_calls:
+                            item_id = tc.get("id") or f"item_{uuid.uuid4().hex[:12]}"
+                            f = tc.get("function", {})
+                            
+                            # 1. Item Added
+                            item_obj = {
+                                "id": item_id,
+                                "object": "realtime.item",
+                                "type": "function_call",
+                                "status": "in_progress",
+                                "role": "assistant"
+                            }
+                            yield sse("response.output_item.added", {"response_id": resp_id, "item": item_obj})
+                            
+                            # 2. Content Part Added
+                            part_obj = {
+                                "type": "function_call",
+                                "name": f.get("name"),
+                                "call_id": item_id,
+                                "arguments": ""
+                            }
+                            yield sse("response.content_part.added", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
+                            
+                            # 3. Content Part Delta (Arguments)
+                            yield sse("response.content_part.delta", {"response_id": resp_id, "item_id": item_id, "part_index": 0, "delta": {"arguments": f.get("arguments", "")}})
+                            
+                            # 4. Content Part Done
+                            part_obj["arguments"] = f.get("arguments", "")
+                            yield sse("response.content_part.done", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
+                            
+                            # 5. Item Done
+                            item_obj["status"] = "completed"
+                            yield sse("response.output_item.done", {"response_id": resp_id, "item": item_obj})
+                            
+                            # Save to DB
+                            db.add_item(conv_id, resp_id, "function_call", "assistant", {"call_id": item_id, "name": f.get("name"), "arguments": f.get("arguments")})
+
+                        # Final Terminal Event: response.done
+                        db.update_response(resp_id, "completed", usage=resp_data.get("usage", {}), metadata=metadata)
+                        final_obj = db.get_response(resp_id)
+                        final_obj["status"] = "completed"
+                        final_obj["error"] = None
+                        
+                        yield sse("response.done", {"response": final_obj})
+                        yield b"data: [DONE]\n\n"
+
+                    except Exception as e:
+                        logging.error(f"Error in response_stream_handler: {e}", exc_info=True)
+                        yield sse("error", {"message": str(e)})
 
                 return response_stream_handler()
             else:
