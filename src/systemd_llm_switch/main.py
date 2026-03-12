@@ -97,13 +97,14 @@ load_config()
 # -----------------------------------------------------------------------------
 
 
-def log_trace(input_raw, raw_output, final_output):
+def log_trace(input_raw, raw_output, final_output, tag="CHAT"):
     """Logs the interaction details to a trace file for debugging.
 
     Args:
         input_raw: The exact raw bytes/string received from the client.
         raw_output: The exact raw bytes/string received from the backend.
         final_output: The final response after repairs.
+        tag: A string identifying the endpoint or context (e.g., 'CHAT', 'RESPONSES').
     """
     if not TRACE_LOG_PATH:
         return
@@ -111,7 +112,7 @@ def log_trace(input_raw, raw_output, final_output):
     try:
         with open(TRACE_LOG_PATH, 'a', encoding='utf-8') as f:
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"--- TRACE {timestamp} ---\n")
+            f.write(f"--- TRACE [{tag}] {timestamp} ---\n")
             f.write("=== INPUT ===\n")
             if isinstance(input_raw, bytes):
                 f.write(input_raw.decode('utf-8', errors='replace'))
@@ -363,7 +364,7 @@ class ChatProxy:
                                 if "index" not in tc:
                                     tc["index"] = i
                     
-                    log_trace(raw_body, result.content, resp_data)
+                    log_trace(raw_body, result.content, resp_data, tag="CHAT")
 
                     chunk_data = resp_data.copy()
                     chunk_data["object"] = "chat.completion.chunk"
@@ -379,13 +380,12 @@ class ChatProxy:
             else:
                 resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json=data, timeout=(10, 1800))
                 resp_data = resp.json()
-                if "choices" in resp_data:
-                    message = resp_data["choices"][0].get("message", {})
+                        message = resp_data["choices"][0].get("message", {})
                     tcs = message.get("tool_calls", [])
                     if tcs:
                         repair_tool_calls(tcs)
                         message["content"] = None
-                log_trace(raw_body, resp.content, resp_data)
+                log_trace(raw_body, resp.content, resp_data, tag="CHAT")
                 web.header('Content-Type', 'application/json')
                 return json.dumps(resp_data)
 
@@ -588,6 +588,8 @@ class ResponsesHandler:
             instructions = data.get("instructions")
             metadata = data.get("metadata", {})
 
+            logging.info(f"Model request accepted: {target_model}")
+
             if not target_model or not ChatProxy.switch_model(target_model):
                 web.ctx.status = "500 Internal Server Error"
                 return json.dumps({"error": f"Failed to activate model {target_model}"})
@@ -625,10 +627,11 @@ class ResponsesHandler:
                     
                     def sse(event, data_obj):
                         seq_counter[0] += 1
-                        # The envelope MUST NOT contain a duplicate "type" if data_obj already has it
                         envelope = data_obj.copy()
                         if "type" not in envelope:
                             envelope["type"] = event
+                        # MUST include sequence_number for protocol compliance
+                        envelope["sequence_number"] = seq_counter[0]
                         return f"event: {event}\ndata: {json.dumps(envelope)}\n\n".encode('utf-8')
 
                     try:
@@ -657,13 +660,19 @@ class ResponsesHandler:
                         t = threading.Thread(target=fetch_backend)
                         t.start()
 
-                        last_heartbeat = time.time()
+                        last_status_update = time.time()
                         while t.is_alive():
                             yield b": keep-alive\n\n"
                             now = time.time()
-                            if now - last_heartbeat >= 2.0:
+                            # Send response.in_progress every 2s as a "liveness" signal for the agent loop
+                            if now - last_status_update >= 2.0:
+                                current_resp = db.get_response(resp_id)
+                                current_resp["status"] = "in_progress"
+                                yield sse("response.in_progress", {"response": current_resp})
+                                last_status_update = now
+                            else:
+                                # Still send a heartbeat for low-level transport liveness
                                 yield sse("response.heartbeat", {"response_id": resp_id})
-                                last_heartbeat = now
                             
                             try:
                                 result = q.get(timeout=1)
@@ -679,10 +688,16 @@ class ResponsesHandler:
                             fail_obj = db.get_response(resp_id)
                             fail_obj["status"] = "failed"
                             fail_obj["error"] = {"message": error_msg}
+                            
+                            log_trace(raw_body, str(result) if isinstance(result, Exception) else result.content, fail_obj, tag="RESPONSES")
+                            
+                            # Send terminal events for failure
+                            yield sse("response.completed", {"response": fail_obj})
                             yield sse("response.done", {"response": fail_obj})
                             return
 
                         resp_data = result.json()
+                        log_trace(raw_body, result.content, resp_data, tag="RESPONSES")
                         msg = resp_data["choices"][0].get("message", {})
                         reasoning = msg.get("reasoning_content")
                         content = msg.get("content")
@@ -692,7 +707,6 @@ class ResponsesHandler:
                         # Process Output Items (Messages)
                         if content:
                             item_id = f"item_{uuid.uuid4().hex[:12]}"
-                            # 1. Item Added
                             item_obj = {
                                 "id": item_id,
                                 "object": "realtime.item",
@@ -703,27 +717,21 @@ class ResponsesHandler:
                             }
                             yield sse("response.output_item.added", {"response_id": resp_id, "item": item_obj})
                             
-                            # 2. Content Part Added
                             part_obj = {"type": "text", "text": ""}
                             yield sse("response.content_part.added", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
                             
-                            # 3. Reasoning Delta (if any)
                             if reasoning:
                                 yield sse("response.content_part.delta", {"response_id": resp_id, "item_id": item_id, "part_index": 0, "delta": {"reasoning_content": reasoning}})
                             
-                            # 4. Content Part Delta (The actual text)
                             yield sse("response.content_part.delta", {"response_id": resp_id, "item_id": item_id, "part_index": 0, "delta": {"text": content}})
                             
-                            # 5. Content Part Done
                             part_obj["text"] = content
                             yield sse("response.content_part.done", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
                             
-                            # 6. Item Done
                             item_obj["status"] = "completed"
                             item_obj["content"] = [part_obj]
                             yield sse("response.output_item.done", {"response_id": resp_id, "item": item_obj})
                             
-                            # Save to DB
                             db.add_item(conv_id, resp_id, "message", "assistant", {"text": content})
 
                         # Process Output Items (Tool Calls)
@@ -731,7 +739,6 @@ class ResponsesHandler:
                             item_id = tc.get("id") or f"item_{uuid.uuid4().hex[:12]}"
                             f = tc.get("function", {})
                             
-                            # 1. Item Added
                             item_obj = {
                                 "id": item_id,
                                 "object": "realtime.item",
@@ -741,7 +748,6 @@ class ResponsesHandler:
                             }
                             yield sse("response.output_item.added", {"response_id": resp_id, "item": item_obj})
                             
-                            # 2. Content Part Added
                             part_obj = {
                                 "type": "function_call",
                                 "name": f.get("name"),
@@ -749,27 +755,25 @@ class ResponsesHandler:
                                 "arguments": ""
                             }
                             yield sse("response.content_part.added", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
-                            
-                            # 3. Content Part Delta (Arguments)
                             yield sse("response.content_part.delta", {"response_id": resp_id, "item_id": item_id, "part_index": 0, "delta": {"arguments": f.get("arguments", "")}})
                             
-                            # 4. Content Part Done
                             part_obj["arguments"] = f.get("arguments", "")
                             yield sse("response.content_part.done", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
                             
-                            # 5. Item Done
                             item_obj["status"] = "completed"
                             yield sse("response.output_item.done", {"response_id": resp_id, "item": item_obj})
                             
-                            # Save to DB
                             db.add_item(conv_id, resp_id, "function_call", "assistant", {"call_id": item_id, "name": f.get("name"), "arguments": f.get("arguments")})
 
-                        # Final Terminal Event: response.done
+                        # Final Terminal Events
                         db.update_response(resp_id, "completed", usage=resp_data.get("usage", {}), metadata=metadata)
                         final_obj = db.get_response(resp_id)
                         final_obj["status"] = "completed"
                         final_obj["error"] = None
                         
+                        # CRITICAL: Codex CLI specifically looks for response.completed
+                        yield sse("response.completed", {"response": final_obj})
+                        # Also send response.done for standard compliance
                         yield sse("response.done", {"response": final_obj})
                         yield b"data: [DONE]\n\n"
 
@@ -786,6 +790,7 @@ class ResponsesHandler:
                 
                 resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json={"model": target_model, "messages": hist, "stream": False}, timeout=(10, 1800))
                 resp_data = resp.json()
+                log_trace(raw_body, resp.content, resp_data, tag="RESPONSES")
                 msg = resp_data["choices"][0].get("message", {})
                 if msg.get("content"):
                     db.add_item(conv_id, resp_id, "message", "assistant", {"text": msg.get("content")})
