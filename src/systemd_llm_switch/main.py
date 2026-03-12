@@ -620,10 +620,20 @@ class ResponsesHandler:
                 web.header('X-Accel-Buffering', 'no')
 
                 def response_stream_handler():
+                    seq_counter = [0]
                     def sse(event, data_obj):
-                        return f"event: {event}\ndata: {json.dumps(data_obj)}\n\n".encode('utf-8')
+                        seq_counter[0] += 1
+                        # Create a envelope that matches the Responses API protocol
+                        envelope = data_obj.copy()
+                        if "type" not in envelope:
+                            envelope["type"] = event
+                        if "sequence_number" not in envelope:
+                            envelope["sequence_number"] = seq_counter[0]
+                        return f"event: {event}\ndata: {json.dumps(envelope)}\n\n".encode('utf-8')
 
-                    yield sse("response.created", db.get_response(resp_id))
+                    resp_obj = db.get_response(resp_id)
+                    yield sse("response.created", resp_obj)
+                    yield sse("response.in_progress", {"response": resp_obj})
                     
                     q = queue.Queue()
                     def fetch_backend():
@@ -650,7 +660,8 @@ class ResponsesHandler:
                         yield b": keep-alive\n\n"
                         yield sse("response.heartbeat", {"response_id": resp_id})
                         try:
-                            result = q.get(timeout=2)
+                            # 1s check for responsiveness
+                            result = q.get(timeout=1)
                             break
                         except queue.Empty:
                             continue
