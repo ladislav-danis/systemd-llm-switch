@@ -324,6 +324,16 @@ class ChatProxy:
                     # Wait for thread with heartbeats
                     while t.is_alive():
                         yield b": keep-alive\n\n"
+                        # For ChatProxy (OpenAI compatibility), we send a heartbeat as a chunk
+                        heartbeat_chunk = {
+                            "id": data.get("id", f"chatcmpl-{uuid.uuid4().hex}"),
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": target_model,
+                            "choices": [],
+                            "heartbeat": True
+                        }
+                        yield f"data: {json.dumps(heartbeat_chunk)}\n\n".encode('utf-8')
                         try:
                             result = q.get(timeout=2)
                             break
@@ -638,6 +648,7 @@ class ResponsesHandler:
 
                     while t.is_alive():
                         yield b": keep-alive\n\n"
+                        yield sse("response.heartbeat", {"response_id": resp_id})
                         try:
                             result = q.get(timeout=2)
                             break
