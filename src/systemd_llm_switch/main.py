@@ -632,6 +632,11 @@ class ResponsesHandler:
                         return f"event: {event}\ndata: {json.dumps(envelope)}\n\n".encode('utf-8')
 
                     resp_obj = db.get_response(resp_id)
+                    # Protocol requires these fields to be explicitly present
+                    resp_obj["status"] = resp_obj.get("status", "in_progress")
+                    resp_obj["usage"] = resp_obj.get("usage")
+                    resp_obj["error"] = None # Explicitly null if no error
+
                     yield sse("response.created", resp_obj)
                     yield sse("response.in_progress", {"response": resp_obj})
                     
@@ -680,7 +685,12 @@ class ResponsesHandler:
                         result = q.get()
 
                     if isinstance(result, Exception) or result.status_code != 200:
-                        yield sse("error", {"message": str(result)})
+                        error_msg = str(result) if isinstance(result, Exception) else f"Backend error: {result.status_code}"
+                        db.update_response(resp_id, "failed")
+                        fail_obj = db.get_response(resp_id)
+                        fail_obj["error"] = {"message": error_msg}
+                        yield sse("response.completed", fail_obj)
+                        yield sse("error", {"message": error_msg})
                         return
 
                     resp_data = result.json()
@@ -713,6 +723,7 @@ class ResponsesHandler:
                         yield sse("response.output_item.done", {"item": item})
                     
                     # Send COMPLETED and DONE for multi-client compatibility
+                    final_obj["error"] = None
                     yield sse("response.completed", final_obj)
                     yield sse("response.done", {"response": final_obj})
                     yield b"data: [DONE]\n\n"
