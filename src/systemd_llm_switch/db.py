@@ -5,9 +5,10 @@ import uuid
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
+
 class Database:
     """Manages SQLite persistence for conversations, responses, and items.
-    
+
     This class handles the creation and management of the database schema,
     providing methods to store and retrieve data compatible with the
     OpenAI Responses API.
@@ -74,7 +75,9 @@ class Database:
             """)
             conn.commit()
 
-    def create_conversation(self, metadata: Optional[Dict[str, Any]] = None) -> str:
+    def create_conversation(
+        self, metadata: Optional[Dict[str, Any]] = None
+    ) -> str:
         """Creates a new conversation record.
 
         Args:
@@ -87,16 +90,17 @@ class Database:
         created_at = int(time.time())
         with self._get_connection() as conn:
             conn.execute(
-                "INSERT INTO conversations (id, created_at, metadata) VALUES (?, ?, ?)",
+                "INSERT INTO conversations (id, created_at, metadata) "
+                "VALUES (?, ?, ?)",
                 (conv_id, created_at, json.dumps(metadata or {}))
             )
             conn.commit()
         return conv_id
 
     def create_response(
-        self, 
-        conversation_id: str, 
-        model: str, 
+        self,
+        conversation_id: str,
+        model: str,
         status: str = "in_progress",
         metadata: Optional[Dict[str, Any]] = None,
         instructions: Optional[str] = None
@@ -117,18 +121,26 @@ class Database:
         created_at = int(time.time())
         with self._get_connection() as conn:
             conn.execute(
-                "INSERT INTO responses (id, conversation_id, model, status, created_at, metadata, instructions) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (resp_id, conversation_id, model, status, created_at, json.dumps(metadata or {}), instructions)
+                "INSERT INTO responses (id, conversation_id, model, status, "
+                "created_at, metadata, instructions) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    resp_id,
+                    conversation_id,
+                    model,
+                    status,
+                    created_at,
+                    json.dumps(metadata or {}),
+                    instructions,
+                ),
             )
             conn.commit()
         return resp_id
 
     def update_response(
-        self, 
-        resp_id: str, 
-        status: str, 
-        usage: Optional[Dict[str, Any]] = None, 
+        self,
+        resp_id: str,
+        status: str,
+        usage: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """Updates an existing response record.
@@ -142,22 +154,29 @@ class Database:
         with self._get_connection() as conn:
             if metadata is not None:
                 conn.execute(
-                    "UPDATE responses SET status = ?, usage = ?, metadata = ? WHERE id = ?",
-                    (status, json.dumps(usage or {}), json.dumps(metadata), resp_id)
+                    "UPDATE responses SET status = ?, usage = ?, metadata = ? "
+                    "WHERE id = ?",
+                    (
+                        status,
+                        json.dumps(usage or {}),
+                        json.dumps(metadata),
+                        resp_id,
+                    ),
                 )
             else:
                 conn.execute(
-                    "UPDATE responses SET status = ?, usage = ? WHERE id = ?",
-                    (status, json.dumps(usage or {}), resp_id)
+                    "UPDATE responses SET status = ?, usage = ? "
+                    "WHERE id = ?",
+                    (status, json.dumps(usage or {}), resp_id),
                 )
             conn.commit()
 
     def add_item(
-        self, 
-        conversation_id: str, 
-        response_id: Optional[str], 
-        item_type: str, 
-        role: str, 
+        self,
+        conversation_id: str,
+        response_id: Optional[str],
+        item_type: str,
+        role: str,
         content: Any
     ) -> str:
         """Adds a new item (message, tool call, etc.) to the database.
@@ -176,16 +195,24 @@ class Database:
         created_at = int(time.time())
         with self._get_connection() as conn:
             conn.execute(
-                "INSERT INTO items (id, response_id, conversation_id, type, role, content, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (item_id, response_id, conversation_id, item_type, role, json.dumps(content), created_at)
+                "INSERT INTO items (id, response_id, conversation_id, type, role, "
+                "content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    item_id,
+                    response_id,
+                    conversation_id,
+                    item_type,
+                    role,
+                    json.dumps(content),
+                    created_at,
+                ),
             )
             conn.commit()
         return item_id
 
     def get_conversation_history(
-        self, 
-        conversation_id: str, 
+        self,
+        conversation_id: str,
         up_to_response_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Retrieves formatted history for a conversation.
@@ -202,50 +229,68 @@ class Database:
             # 1. Belong to a response that was created at or before the target response
             # 2. Are input items (response_id IS NULL) created before the target response
             query = """
-                SELECT type, role, content FROM items 
-                WHERE conversation_id = ? 
+                SELECT type, role, content FROM items
+                WHERE conversation_id = ?
                 AND (
                     (response_id IS NOT NULL AND response_id IN (
-                        SELECT id FROM responses WHERE conversation_id = ? 
-                        AND created_at <= (SELECT created_at FROM responses WHERE id = ?)
+                        SELECT id FROM responses WHERE conversation_id = ?
+                        AND created_at <= (
+                            SELECT created_at FROM responses WHERE id = ?
+                        )
                     ))
-                    OR 
+                    OR
                     (response_id IS NULL AND created_at < (
                         SELECT created_at FROM responses WHERE id = ?
                     ))
                 )
                 ORDER BY created_at ASC
             """
-            params = [conversation_id, conversation_id, up_to_response_id, up_to_response_id]
+            params = [
+                conversation_id,
+                conversation_id,
+                up_to_response_id,
+                up_to_response_id,
+            ]
         else:
-            query = "SELECT type, role, content FROM items WHERE conversation_id = ? ORDER BY created_at ASC"
+            query = (
+                "SELECT type, role, content FROM items "
+                "WHERE conversation_id = ? ORDER BY created_at ASC"
+            )
             params = [conversation_id]
-        
+
         with self._get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
             history = []
-            
+
             for row in rows:
                 item_type = row['type']
                 content = json.loads(row['content'])
-                
+
                 if item_type == "message":
-                    history.append({
-                        "role": row['role'],
-                        "content": content.get("text") if isinstance(content, dict) else content
-                    })
+                    history.append(
+                        {
+                            "role": row["role"],
+                            "content": (
+                                content.get("text")
+                                if isinstance(content, dict)
+                                else content
+                            ),
+                        }
+                    )
                 elif item_type == "function_call":
                     # Tool call from assistant
                     # Check if last message was also an assistant message with tool_calls
                     if history and history[-1]["role"] == "assistant" and "tool_calls" in history[-1]:
-                        history[-1]["tool_calls"].append({
-                            "id": content.get("call_id"),
-                            "type": "function",
-                            "function": {
-                                "name": content.get("name"),
-                                "arguments": content.get("arguments")
+                        history[-1]["tool_calls"].append(
+                            {
+                                "id": content.get("call_id"),
+                                "type": "function",
+                                "function": {
+                                    "name": content.get("name"),
+                                    "arguments": content.get("arguments"),
+                                },
                             }
-                        })
+                        )
                     else:
                         history.append({
                             "role": "assistant",
@@ -266,7 +311,7 @@ class Database:
                         "tool_call_id": content.get("tool_call_id"),
                         "content": content.get("content")
                     })
-            
+
             return history
 
     def get_response(self, resp_id: str) -> Optional[Dict[str, Any]]:
@@ -279,23 +324,27 @@ class Database:
             A dictionary containing response data or None if not found.
         """
         with self._get_connection() as conn:
-            row = conn.execute("SELECT * FROM responses WHERE id = ?", (resp_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM responses WHERE id = ?", (resp_id,)
+            ).fetchone()
             if not row:
                 return None
-            
+
             output_items = self.get_response_items(resp_id)
 
             return {
-                "id": row['id'],
+                "id": row["id"],
                 "object": "response",
-                "created_at": row['created_at'],
-                "model": row['model'],
-                "status": row['status'],
-                "conversation_id": row['conversation_id'],
-                "usage": json.loads(row['usage']) if row['usage'] else None,
+                "created_at": row["created_at"],
+                "model": row["model"],
+                "status": row["status"],
+                "conversation_id": row["conversation_id"],
+                "usage": json.loads(row["usage"]) if row["usage"] else None,
                 "output": output_items,
-                "metadata": json.loads(row['metadata']) if row['metadata'] else {},
-                "instructions": row['instructions']
+                "metadata": (
+                    json.loads(row["metadata"]) if row["metadata"] else {}
+                ),
+                "instructions": row["instructions"],
             }
 
     def get_response_items(self, resp_id: str) -> List[Dict[str, Any]]:
@@ -309,15 +358,15 @@ class Database:
         """
         with self._get_connection() as conn:
             items_rows = conn.execute(
-                "SELECT * FROM items WHERE response_id = ?", 
+                "SELECT * FROM items WHERE response_id = ?",
                 (resp_id,)
             ).fetchall()
-            
+
             output_items = []
             for ir in items_rows:
                 item_type = ir['type']
                 content_raw = json.loads(ir['content'])
-                
+
                 item = {
                     "id": ir['id'],
                     "object": "item",
@@ -327,19 +376,23 @@ class Database:
                 }
 
                 if item_type == "message":
-                    item["role"] = ir['role']
+                    item["role"] = ir["role"]
                     item["content"] = [
                         {
                             "type": "output_text",
-                            "text": content_raw.get("text") if isinstance(content_raw, dict) else content_raw,
-                            "annotations": []
+                            "text": (
+                                content_raw.get("text")
+                                if isinstance(content_raw, dict)
+                                else content_raw
+                            ),
+                            "annotations": [],
                         }
                     ]
                 elif item_type == "function_call":
                     item["call_id"] = content_raw.get("call_id")
                     item["name"] = content_raw.get("name")
                     item["arguments"] = content_raw.get("arguments")
-                
+
                 output_items.append(item)
             return output_items
 
@@ -356,11 +409,15 @@ class Database:
             # Delete associated items first
             conn.execute("DELETE FROM items WHERE response_id = ?", (resp_id,))
             # Delete the response
-            cursor = conn.execute("DELETE FROM responses WHERE id = ?", (resp_id,))
+            cursor = conn.execute(
+                "DELETE FROM responses WHERE id = ?", (resp_id,)
+            )
             conn.commit()
             return cursor.rowcount > 0
 
-    def get_conversation(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+    def get_conversation(
+        self, conversation_id: str
+    ) -> Optional[Dict[str, Any]]:
         """Retrieves a single conversation record by ID.
 
         Args:
@@ -370,17 +427,26 @@ class Database:
             A dictionary containing conversation data or None if not found.
         """
         with self._get_connection() as conn:
-            row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
             if not row:
                 return None
             return {
-                "id": row['id'],
+                "id": row["id"],
                 "object": "conversation",
-                "created_at": row['created_at'],
-                "metadata": json.loads(row['metadata']) if row['metadata'] else {}
+                "created_at": row["created_at"],
+                "metadata": (
+                    json.loads(row["metadata"])
+                    if row["metadata"]
+                    else {}
+                ),
             }
 
-    def update_conversation(self, conversation_id: str, metadata: Dict[str, Any]) -> bool:
+    def update_conversation(
+        self, conversation_id: str, metadata: Dict[str, Any]
+    ) -> bool:
         """Updates metadata for an existing conversation.
 
         Args:
@@ -400,7 +466,7 @@ class Database:
 
     def delete_conversation(self, conversation_id: str) -> bool:
         """Deletes a conversation record.
-        
+
         Note: Associated items are dissociated (conversation_id set to NULL)
         rather than deleted.
 
@@ -412,8 +478,15 @@ class Database:
         """
         with self._get_connection() as conn:
             # Dissociate items as per spec
-            conn.execute("UPDATE items SET conversation_id = NULL WHERE conversation_id = ?", (conversation_id,))
-            cursor = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            conn.execute(
+                "UPDATE items SET conversation_id = NULL "
+                "WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            cursor = conn.execute(
+                "DELETE FROM conversations WHERE id = ?",
+                (conversation_id,),
+            )
             conn.commit()
             return cursor.rowcount > 0
 
@@ -427,26 +500,32 @@ class Database:
             A dictionary containing formatted item data or None if not found.
         """
         with self._get_connection() as conn:
-            row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM items WHERE id = ?", (item_id,)
+            ).fetchone()
             if not row:
                 return None
-            
-            content_raw = json.loads(row['content'])
+
+            content_raw = json.loads(row["content"])
             item = {
-                "id": row['id'],
+                "id": row["id"],
                 "object": "item",
-                "type": row['type'],
+                "type": row["type"],
                 "status": "completed",
-                "created_at": row['created_at']
+                "created_at": row["created_at"],
             }
 
-            if row['type'] == "message":
-                item["role"] = row['role']
+            if row["type"] == "message":
+                item["role"] = row["role"]
                 item["content"] = [
                     {
                         "type": "output_text",
-                        "text": content_raw.get("text") if isinstance(content_raw, dict) else content_raw,
-                        "annotations": []
+                        "text": (
+                            content_raw.get("text")
+                            if isinstance(content_raw, dict)
+                            else content_raw
+                        ),
+                        "annotations": [],
                     }
                 ]
             elif row['type'] == "function_call":
@@ -456,7 +535,7 @@ class Database:
             elif row['type'] == "tool":
                 item["tool_call_id"] = content_raw.get("tool_call_id")
                 item["output"] = content_raw.get("content")
-            
+
             return item
 
     def delete_item(self, item_id: str) -> bool:
@@ -474,10 +553,10 @@ class Database:
             return cursor.rowcount > 0
 
     def get_conversation_items(
-        self, 
-        conversation_id: str, 
-        limit: int = 20, 
-        after: Optional[str] = None, 
+        self,
+        conversation_id: str,
+        limit: int = 20,
+        after: Optional[str] = None,
         order: str = "desc"
     ) -> List[Dict[str, Any]]:
         """Retrieves a paginated list of items for a conversation.
@@ -493,16 +572,23 @@ class Database:
         """
         query = "SELECT id FROM items WHERE conversation_id = ?"
         params: List[Any] = [conversation_id]
-        
+
         if after:
             # Simple cursor-based pagination
             op = "<" if order.lower() == "desc" else ">"
-            query += f" AND created_at {op} (SELECT created_at FROM items WHERE id = ?)"
+            query += (
+                f" AND created_at {op} "
+                "(SELECT created_at FROM items WHERE id = ?)"
+            )
             params.append(after)
-            
+
         query += f" ORDER BY created_at {order.upper()} LIMIT ?"
         params.append(limit)
-        
+
         with self._get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
-            return [self.get_item(row['id']) for row in rows if self.get_item(row['id']) is not None]  # type: ignore
+            return [
+                self.get_item(row["id"])
+                for row in rows
+                if self.get_item(row["id"]) is not None
+            ]  # type: ignore
