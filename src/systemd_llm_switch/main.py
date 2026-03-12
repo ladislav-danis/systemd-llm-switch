@@ -656,11 +656,22 @@ class ResponsesHandler:
                     t = threading.Thread(target=fetch_backend)
                     t.start()
 
+                    last_in_progress_time = time.time()
                     while t.is_alive():
                         yield b": keep-alive\n\n"
-                        yield sse("response.heartbeat", {"response_id": resp_id})
+                        
+                        now = time.time()
+                        if now - last_in_progress_time >= 2.0:
+                            # Send official in_progress event as a keep-alive
+                            current_resp = db.get_response(resp_id)
+                            yield sse("response.in_progress", {"response": current_resp})
+                            last_in_progress_time = now
+                        else:
+                            # Still send a heartbeat for transport-level keep-alive
+                            yield sse("response.heartbeat", {"response_id": resp_id})
+                            
                         try:
-                            # 1s check for responsiveness
+                            # Check for result every 1s
                             result = q.get(timeout=1)
                             break
                         except queue.Empty:
