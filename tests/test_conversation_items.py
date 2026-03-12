@@ -32,6 +32,7 @@ class TestConversationItemsAPI(unittest.TestCase):
             db_file.unlink()
 
     def test_item_management(self):
+        """Test creating, listing, retrieving, and deleting conversation items via the API handlers."""
         conv_id = self.db.create_conversation()
         
         # 1. Create Items

@@ -30,6 +30,7 @@ class TestEmbeddingsAPI(unittest.TestCase):
     @patch('requests.post')
     @patch('systemd_llm_switch.main.ChatProxy.switch_model')
     def test_embeddings_proxy(self, mock_switch, mock_post):
+        """Test the /v1/embeddings proxy, ensuring it switches to the correct model and forwards the response."""
         mock_switch.return_value = True
         
         mock_resp = MagicMock()

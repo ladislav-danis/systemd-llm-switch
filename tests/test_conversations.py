@@ -31,6 +31,7 @@ class TestConversationsAPI(unittest.TestCase):
             db_file.unlink()
 
     def test_create_conversation(self):
+        """Test the creation of a new conversation via the POST endpoint."""
         main.web._test_data = json.dumps({
             "metadata": {"test": "val"},
             "items": [{"type": "message", "role": "user", "content": "Hello"}]
@@ -48,6 +49,7 @@ class TestConversationsAPI(unittest.TestCase):
         self.assertEqual(history[0]["content"], "Hello")
 
     def test_retrieve_update_delete_conversation(self):
+        """Test retrieving, updating metadata, and deleting a conversation."""
         conv_id = self.db.create_conversation(metadata={"old": "meta"})
         
         handler = main.ConversationsDetailHandler()

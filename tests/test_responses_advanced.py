@@ -39,6 +39,7 @@ class TestResponsesAdvanced(unittest.TestCase):
     @patch('requests.post')
     @patch('systemd_llm_switch.main.ChatProxy.switch_model')
     def test_multimodal_and_metadata(self, mock_switch, mock_post):
+        """Test handling of multimodal inputs (images) and proper storage/retrieval of metadata."""
         mock_switch.return_value = True
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -75,6 +76,7 @@ class TestResponsesAdvanced(unittest.TestCase):
     @patch('requests.post')
     @patch('systemd_llm_switch.main.ChatProxy.switch_model')
     def test_tool_output_and_branching(self, mock_switch, mock_post):
+        """Test multi-turn tool interaction, including tool call outputs and conversation branching via previous_response_id."""
         mock_switch.return_value = True
         
         # First turn: model calls a tool

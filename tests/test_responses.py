@@ -41,6 +41,7 @@ class TestResponsesAPI(unittest.TestCase):
             db_file.unlink()
 
     def test_database_persistence(self):
+        """Test that conversation items can be correctly stored and retrieved from the database."""
         conv_id = self.db.create_conversation()
         self.assertTrue(conv_id.startswith("conv_"))
         
@@ -51,6 +52,7 @@ class TestResponsesAPI(unittest.TestCase):
         self.assertEqual(history[0]['content'], 'Hello')
 
     def test_responses_endpoint_routing(self):
+        """Test that the /v1/responses endpoint is properly routed."""
         # Verify our handler is in the urls list
         self.assertIn('/v1/responses', main.urls)
         self.assertIn('ResponsesHandler', main.urls)
@@ -58,6 +60,7 @@ class TestResponsesAPI(unittest.TestCase):
     @patch('requests.post')
     @patch('systemd_llm_switch.main.ChatProxy.switch_model')
     def test_streaming_logic_responses(self, mock_switch, mock_post):
+        """Test that the streaming mode correctly produces OpenAI Responses API compatible SSE events."""
         mock_switch.return_value = True
         
         mock_resp = MagicMock()
@@ -89,9 +92,10 @@ class TestResponsesAPI(unittest.TestCase):
         self.assertIn('event: response.created', content)
         self.assertIn('event: response.output_item.added', content)
         self.assertIn('event: response.content_part.added', content)
-        self.assertIn('event: response.text.delta', content)
+        self.assertIn('event: response.content_part.delta', content)
         self.assertIn('event: response.content_part.done', content)
         self.assertIn('event: response.output_item.done', content)
+        self.assertIn('event: response.completed', content)
         self.assertIn('event: response.done', content)
         self.assertIn('data: [DONE]', content)
 
