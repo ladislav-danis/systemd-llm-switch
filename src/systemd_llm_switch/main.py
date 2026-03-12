@@ -348,6 +348,10 @@ class ChatProxy:
                         if tcs:
                             repair_tool_calls(tcs)
                             message["content"] = None
+                            # Add index to tool_calls for streaming compatibility
+                            for i, tc in enumerate(tcs):
+                                if "index" not in tc:
+                                    tc["index"] = i
                     
                     log_trace(raw_body, result.content, resp_data)
 
