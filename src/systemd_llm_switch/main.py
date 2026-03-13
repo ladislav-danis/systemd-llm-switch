@@ -118,13 +118,13 @@ def log_trace(input_raw, raw_output, final_output, tag="CHAT"):
                 f.write(input_raw.decode('utf-8', errors='replace'))
             else:
                 f.write(str(input_raw))
-            
+
             f.write("\n\n=== RAW OUTPUT ===\n")
             if isinstance(raw_output, bytes):
                 f.write(raw_output.decode('utf-8', errors='replace'))
             else:
                 f.write(str(raw_output))
-                
+
             f.write("\n\n=== FINAL OUTPUT ===\n")
             if isinstance(final_output, (dict, list)):
                 f.write(json.dumps(final_output, indent=2, ensure_ascii=False))
@@ -310,7 +310,7 @@ class ChatProxy:
                 def chat_stream_handler():
                     # Send initial comment to keep connection alive
                     yield b": keep-alive\n\n"
-                    
+
                     q = queue.Queue()
                     def fetch_backend():
                         try:
@@ -363,7 +363,7 @@ class ChatProxy:
                             for i, tc in enumerate(tcs):
                                 if "index" not in tc:
                                     tc["index"] = i
-                    
+
                     log_trace(raw_body, result.content, resp_data, tag="CHAT")
 
                     chunk_data = resp_data.copy()
@@ -372,7 +372,7 @@ class ChatProxy:
                         choice = chunk_data["choices"][0]
                         if "message" in choice:
                             choice["delta"] = choice.pop("message")
-                    
+
                     yield f"data: {json.dumps(chunk_data)}\n\n".encode('utf-8')
                     yield b"data: [DONE]\n\n"
 
@@ -411,7 +411,7 @@ class ModelDetail:
         if model_id not in MODELS:
             web.ctx.status = "404 Not Found"
             return json.dumps({"error": "Model not found"})
-        
+
         web.header('Content-Type', 'application/json')
         return json.dumps({
             "id": model_id,
@@ -503,7 +503,7 @@ class ConversationsHandler:
             for item in data.get("items", []):
                 if item.get("type") == "message":
                     db.add_item(conv_id, None, "message", item.get("role", "user"), item.get("content"))
-            
+
             web.header('Content-Type', 'application/json')
             return json.dumps(db.get_conversation(conv_id))
         except Exception as e:
@@ -597,7 +597,7 @@ class ResponsesHandler:
 
             if not conv_id:
                 conv_id = db.create_conversation()
-            
+
             current_messages = []
             for item in input_items:
                 itype = item.get("type")
@@ -625,7 +625,7 @@ class ResponsesHandler:
                 def response_stream_handler():
                     # Protocol constants and counters
                     seq_counter = [0]
-                    
+
                     def sse(event, data_obj):
                         seq_counter[0] += 1
                         envelope = data_obj.copy()
@@ -639,19 +639,19 @@ class ResponsesHandler:
                         resp_obj = db.get_response(resp_id)
                         # Mandatory: response.created
                         yield sse("response.created", {"response": resp_obj})
-                        
+
                         q = queue.Queue()
                         def fetch_backend():
                             try:
                                 hist = db.get_conversation_history(conv_id, up_to_response_id=prev_resp_id)
                                 if prev_resp_id: hist.extend(current_messages)
                                 if instructions: hist.insert(0, {"role": "system", "content": instructions})
-                                
+
                                 tools = []
                                 for t in data.get("tools", []):
                                     if t.get("type") == "function":
                                         tools.append({"type": "function", "function": {"name": t.get("name"), "description": t.get("description", ""), "parameters": t.get("parameters", {})}})
-                                
+
                                 payload = {"model": target_model, "messages": hist, "stream": False}
                                 if tools: payload["tools"] = tools
                                 q.put(requests.post(f"{LLAMA_URL}/v1/chat/completions", json=payload, timeout=(10, 1800)))
@@ -674,7 +674,7 @@ class ResponsesHandler:
                             else:
                                 # Still send a heartbeat for low-level transport liveness
                                 yield sse("response.heartbeat", {"response_id": resp_id})
-                            
+
                             try:
                                 result = q.get(timeout=1)
                                 break
@@ -689,9 +689,9 @@ class ResponsesHandler:
                             fail_obj = db.get_response(resp_id)
                             fail_obj["status"] = "failed"
                             fail_obj["error"] = {"message": error_msg}
-                            
+
                             log_trace(raw_body, str(result) if isinstance(result, Exception) else result.content, fail_obj, tag="RESPONSES")
-                            
+
                             # Send terminal events for failure
                             yield sse("response.completed", {"response": fail_obj})
                             yield sse("response.done", {"response": fail_obj})
@@ -717,29 +717,29 @@ class ResponsesHandler:
                                 "content": []
                             }
                             yield sse("response.output_item.added", {"response_id": resp_id, "item": item_obj})
-                            
+
                             part_obj = {"type": "text", "text": ""}
                             yield sse("response.content_part.added", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
-                            
+
                             if reasoning:
                                 yield sse("response.content_part.delta", {"response_id": resp_id, "item_id": item_id, "part_index": 0, "delta": {"reasoning_content": reasoning}})
-                            
+
                             yield sse("response.content_part.delta", {"response_id": resp_id, "item_id": item_id, "part_index": 0, "delta": {"text": content}})
-                            
+
                             part_obj["text"] = content
                             yield sse("response.content_part.done", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
-                            
+
                             item_obj["status"] = "completed"
                             item_obj["content"] = [part_obj]
                             yield sse("response.output_item.done", {"response_id": resp_id, "item": item_obj})
-                            
+
                             db.add_item(conv_id, resp_id, "message", "assistant", {"text": content})
 
                         # Process Output Items (Tool Calls)
                         for tc in t_calls:
                             item_id = tc.get("id") or f"item_{uuid.uuid4().hex[:12]}"
                             f = tc.get("function", {})
-                            
+
                             item_obj = {
                                 "id": item_id,
                                 "object": "realtime.item",
@@ -748,7 +748,7 @@ class ResponsesHandler:
                                 "role": "assistant"
                             }
                             yield sse("response.output_item.added", {"response_id": resp_id, "item": item_obj})
-                            
+
                             part_obj = {
                                 "type": "function_call",
                                 "name": f.get("name"),
@@ -757,13 +757,13 @@ class ResponsesHandler:
                             }
                             yield sse("response.content_part.added", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
                             yield sse("response.content_part.delta", {"response_id": resp_id, "item_id": item_id, "part_index": 0, "delta": {"arguments": f.get("arguments", "")}})
-                            
+
                             part_obj["arguments"] = f.get("arguments", "")
                             yield sse("response.content_part.done", {"response_id": resp_id, "item_id": item_id, "part": part_obj})
-                            
+
                             item_obj["status"] = "completed"
                             yield sse("response.output_item.done", {"response_id": resp_id, "item": item_obj})
-                            
+
                             db.add_item(conv_id, resp_id, "function_call", "assistant", {"call_id": item_id, "name": f.get("name"), "arguments": f.get("arguments")})
 
                         # Final Terminal Events
@@ -771,7 +771,7 @@ class ResponsesHandler:
                         final_obj = db.get_response(resp_id)
                         final_obj["status"] = "completed"
                         final_obj["error"] = None
-                        
+
                         # CRITICAL: Codex CLI specifically looks for response.completed
                         yield sse("response.completed", {"response": final_obj})
                         # Also send response.done for standard compliance
@@ -788,7 +788,7 @@ class ResponsesHandler:
                 hist = db.get_conversation_history(conv_id, up_to_response_id=prev_resp_id)
                 if prev_resp_id: hist.extend(current_messages)
                 if instructions: hist.insert(0, {"role": "system", "content": instructions})
-                
+
                 resp = requests.post(f"{LLAMA_URL}/v1/chat/completions", json={"model": target_model, "messages": hist, "stream": False}, timeout=(10, 1800))
                 resp_data = resp.json()
                 log_trace(raw_body, resp.content, resp_data, tag="RESPONSES")
