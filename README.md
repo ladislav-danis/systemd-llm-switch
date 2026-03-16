@@ -236,7 +236,6 @@ systemctl --user stop qwen3-coder-flash.service qwen3-coder-next.service qwen3-t
 The project includes a test suite to verify correct setup:
 
 * **Unit Tests**: Run `./run_tests.sh` to execute the unit tests and verify the integrity of the Python code.
-* **Smoke Test**: Execute `python3 tests/test_smoke.py` to perform a real request to the proxy and verify the model starts and responds correctly.
 * **Real-Proxy Integration Tests**: Advanced tests that run against a live proxy instance to verify tool calling, parallel execution, and streaming behavior.
 
 ### Running Tests
@@ -245,9 +244,6 @@ The project includes a test suite to verify correct setup:
 # Run all unit tests
 ./run_tests.sh
 
-# Run only the smoke test
-python3 tests/test_smoke.py
-
 # Run real-proxy integration tests (proxy must be running)
 # By default, it targets http://127.0.0.1:3002
 ./.venv/bin/python3 -m unittest tests/test_integration_real_proxy.py -v
@@ -255,12 +251,6 @@ python3 tests/test_smoke.py
 # Custom proxy URL for integration tests:
 LLM_PROXY_URL=http://192.168.122.1:3002 ./.venv/bin/python3 -m unittest tests/test_integration_real_proxy.py -v
 ```
-
-The smoke test will:
-1. Start the proxy server
-2. Make a test request to list available models
-3. Attempt to switch to a model and make a chat completion request
-4. Verify the response is valid JSON
 
 ---
 

@@ -1,5 +1,25 @@
+# IDEs
 .aider*
-.gitignore
-.venv
-__pycache__
-.pytest_cache*.log
+.vscode/
+.idea/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+*.log
+src/systemd_llm_switch/*.log
+llm_trace.log
+
+# Testing & Linting
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/

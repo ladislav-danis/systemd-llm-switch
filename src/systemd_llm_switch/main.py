@@ -77,7 +77,11 @@ load_config()
 # -----------------------------------------------------------------------------
 
 
-def log_trace(input_raw, raw_output, final_output):
+def log_trace(
+    input_raw: any,
+    raw_output: any,
+    final_output: any
+) -> None:
     """Logs the interaction details to a trace file for debugging.
 
     Args:

@@ -7,20 +7,21 @@ import time
 # Configuration for integration tests
 PROXY_URL = os.environ.get("LLM_PROXY_URL", "http://127.0.0.1:3002")
 TEST_MODEL = os.environ.get("LLM_TEST_MODEL", "qwen3-coder-next")
+TEST_EMBEDDING_MODEL = os.environ.get("LLM_TEST_EMBEDDING_MODEL", "bge-m3")
 
 def is_proxy_available():
     """Check if the proxy server is running."""
     try:
         response = requests.get(f"{PROXY_URL}/v1/models", timeout=2)
         if response.status_code == 200:
-            # Check if our test model is in the list
-            models = response.json().get("data", [])
-            return any(m["id"] == TEST_MODEL for m in models)
+            # Check if our test models are in the list
+            models = [m["id"] for m in response.json().get("data", [])]
+            return TEST_MODEL in models or TEST_EMBEDDING_MODEL in models
     except:
         pass
     return False
 
-@unittest.skipUnless(is_proxy_available(), f"Proxy not available at {PROXY_URL} or model {TEST_MODEL} not found")
+@unittest.skipUnless(is_proxy_available(), f"Proxy not available at {PROXY_URL}")
 class TestRealProxyIntegration(unittest.TestCase):
     """Real integration tests against a running proxy instance."""
 
@@ -128,6 +129,21 @@ class TestRealProxyIntegration(unittest.TestCase):
                     self.assertEqual(delta["tool_calls"][0]["function"]["name"], "get_weather")
         
         self.assertTrue(tool_calls_detected, "No tool calls detected in stream")
+
+    def test_embeddings(self):
+        """Test the embeddings endpoint."""
+        payload = {
+            "model": TEST_EMBEDDING_MODEL,
+            "input": "This is a test for embeddings."
+        }
+        
+        response = requests.post(f"{PROXY_URL}/v1/embeddings", json=payload, timeout=120)
+        self.assertEqual(response.status_code, 200)
+        
+        data = response.json()
+        self.assertIn("data", data)
+        self.assertIn("embedding", data["data"][0])
+        self.assertEqual(data["model"], TEST_EMBEDDING_MODEL)
 
 if __name__ == "__main__":
     unittest.main()
