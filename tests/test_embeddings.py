@@ -12,7 +12,8 @@ mock_web._test_data = ""
 mock_web.data = lambda: mock_web._test_data
 sys.modules['web'] = mock_web
 sys.path.append('src/systemd_llm_switch')
-import main # noqa
+import main  # noqa
+
 
 class TestEmbeddingsProxy(unittest.TestCase):
     """Test suite for the Embeddings endpoint."""
@@ -52,7 +53,11 @@ class TestEmbeddingsProxy(unittest.TestCase):
         mock_response.status_code = 200
         mock_response_data = {
             "object": "list",
-            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
+            "data": [
+                {"object": "embedding", "index": 0, "embedding": [
+                    0.1, 0.2, 0.3
+                ]}
+            ],
             "model": "bge-m3"
         }
         mock_response.content = json.dumps(mock_response_data).encode('utf-8')
@@ -66,7 +71,9 @@ class TestEmbeddingsProxy(unittest.TestCase):
 
         # Verify model switching
         calls = [str(c) for c in mock_run.call_args_list]
-        self.assertTrue(any("start" in c and "bge-m3.service" in c for c in calls))
+        self.assertTrue(
+            any("start" in c and "bge-m3.service" in c for c in calls)
+        )
         self.assertEqual(main.BaseModelProxy._current_active_model, "bge-m3")
 
     @patch('main.subprocess.run')
@@ -79,6 +86,7 @@ class TestEmbeddingsProxy(unittest.TestCase):
 
         self.assertIn("Failed to activate model", result)
         self.assertEqual(main.web.ctx.status, "500 Internal Server Error")
+
 
 if __name__ == '__main__':
     unittest.main()

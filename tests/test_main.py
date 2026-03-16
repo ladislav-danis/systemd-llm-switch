@@ -130,7 +130,8 @@ class TestModelProxy(unittest.TestCase):
     @patch('main.requests.post')
     def test_streaming_disabled_always(self, mock_post, mock_run):
         """Test that even when stream: True is requested,
-        it fetches the full response to repair it, but returns a fake SSE stream to the client."""
+        it fetches the full response to repair it,
+        but returns a fake SSE stream to the client."""
         main.web._test_data = json.dumps({
             "model": "qwen3-coder-flash",  # noqa: E501
             "stream": True,
@@ -153,7 +154,7 @@ class TestModelProxy(unittest.TestCase):
         # It should return a generator for the fake stream
         import types
         self.assertIsInstance(result, types.GeneratorType)
-        
+
         chunks = list(result)
         self.assertEqual(len(chunks), 2)
         self.assertTrue(chunks[0].startswith(b'data: {'))
@@ -179,7 +180,9 @@ class TestModelProxy(unittest.TestCase):
     @patch('main.subprocess.run')
     @patch('main.requests.post')
     @patch('main.requests.get')
-    def test_tool_call_content_null_and_repair(self, mock_get, mock_post, mock_run):
+    def test_tool_call_content_null_and_repair(
+        self, mock_get, mock_post, mock_run
+    ):
         """Test that content is set to null when tool_calls are present
         and that tool_calls arguments are repaired."""
         main.web._test_data = json.dumps({
@@ -200,7 +203,8 @@ class TestModelProxy(unittest.TestCase):
                         "type": "function",
                         "function": {
                             "name": "get_weather",
-                            "arguments": '{"location": "Prague", }' # Trailing comma
+                            "arguments": '{"location": "Prague", }'
+                            # Trailing comma
                         }
                     }]
                 }
@@ -229,7 +233,8 @@ class TestModelProxy(unittest.TestCase):
     @patch('main.requests.post')
     @patch('main.requests.get')
     def test_no_json_repair_in_content(self, mock_get, mock_post, mock_run):
-        """Test that main content is NOT repaired even if it looks like malformed JSON."""
+        """Test that main content is NOT repaired
+        even if it looks like malformed JSON."""
         main.web._test_data = json.dumps({
             "model": "qwen3-coder-flash",
             "messages": [{"role": "user", "content": "Give me example"}]
@@ -252,7 +257,10 @@ class TestModelProxy(unittest.TestCase):
 
         parsed_result = json.loads(result)
         # Content should remain exactly as it was
-        self.assertEqual(parsed_result["choices"][0]["message"]["content"], malformed_json_text)
+        self.assertEqual(
+            parsed_result["choices"][0]["message"]["content"],
+            malformed_json_text
+        )
 
     def test_list_models_endpoint(self):
         """Test that the endpoint /v1/models returns all defined models."""
@@ -286,7 +294,9 @@ class TestModelProxy(unittest.TestCase):
             mock_get.return_value = MagicMock(status_code=200)
 
             # Raw output with deliberate formatting
-            raw_output_bytes = b'{"choices": [{"message": {"arguments": "{\\"a\\": 1,}"}}]}'
+            raw_output_bytes = (
+                b'{"choices": [{"message": {"arguments": "{\\"a\\": 1,}"}}]}'
+            )
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.json.return_value = json.loads(raw_output_bytes)
@@ -300,9 +310,15 @@ class TestModelProxy(unittest.TestCase):
             with open(test_log, 'r') as f:
                 content = f.read()
                 # Verify 1:1 input (including leading/trailing spaces)
-                self.assertIn("=== INPUT ===\n { \"model\": \"qwen3-coder-flash\" } ", content)
+                self.assertIn(
+                    "=== INPUT ===\n { \"model\": \"qwen3-coder-flash\" } ",
+                    content
+                )
                 # Verify 1:1 output (exact bytes)
-                self.assertIn("=== RAW OUTPUT ===\n" + raw_output_bytes.decode(), content)
+                self.assertIn(
+                    "=== RAW OUTPUT ===\n" + raw_output_bytes.decode(),
+                    content
+                )
                 self.assertIn("=== FINAL OUTPUT ===", content)
         finally:
             if test_log.exists():
