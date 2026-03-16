@@ -1,0 +1,222 @@
+--- TRACE 2026-03-16 09:25:59 ---
+=== INPUT ===
+{"model": "bge-m3", "input": "The food was delicious and the service was excellent."}
+
+=== RAW OUTPUT ===
+{"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}], "model": "bge-m3"}
+
+=== FINAL OUTPUT ===
+{"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}], "model": "bge-m3"}
+========================================
+
+--- TRACE 2026-03-16 09:25:59 ---
+=== INPUT ===
+{"model": "qwen3-coder-flash", "messages": [{"role": "user", "content": "Give me example"}]}
+
+=== RAW OUTPUT ===
+<MagicMock name='post().content' id='140332685929104'>
+
+=== FINAL OUTPUT ===
+{
+  "choices": [
+    {
+      "message": {
+        "content": "Here is bad json: {\"key\": \"value\", }"
+      }
+    }
+  ]
+}
+========================================
+
+--- TRACE 2026-03-16 09:25:59 ---
+=== INPUT ===
+{"model": "qwen3-coder-flash", "stream": true, "messages": []}
+
+=== RAW OUTPUT ===
+<MagicMock name='post().content' id='140332685983952'>
+
+=== FINAL OUTPUT ===
+{
+  "choices": [
+    {
+      "message": {
+        "content": "Normal response",
+        "role": "assistant"
+      }
+    }
+  ]
+}
+========================================
+
+--- TRACE 2026-03-16 09:25:59 ---
+=== INPUT ===
+{"model": "qwen3-coder-flash", "messages": [{"role": "user", "content": "Hi"}], "stream": false}
+
+=== RAW OUTPUT ===
+{"choices": [{"message": {"content": "Python code"}}]}
+
+=== FINAL OUTPUT ===
+{
+  "choices": [
+    {
+      "message": {
+        "content": "Python code"
+      }
+    }
+  ]
+}
+========================================
+
+--- TRACE 2026-03-16 09:25:59 ---
+=== INPUT ===
+{"model": "qwen3-thinking", "stream": false, "messages": []}
+
+=== RAW OUTPUT ===
+{"thinking": "..."}
+
+=== FINAL OUTPUT ===
+{
+  "thinking": "..."
+}
+========================================
+
+--- TRACE 2026-03-16 09:25:59 ---
+=== INPUT ===
+{"model": "qwen3-coder-flash", "stream": false, "messages": [{"role": "user", "content": "Get weather"}]}
+
+=== RAW OUTPUT ===
+<MagicMock name='post().content' id='140332683956240'>
+
+=== FINAL OUTPUT ===
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\": \"Prague\"}"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
+========================================
+
+--- TRACE 2026-03-16 09:26:38 ---
+=== INPUT ===
+{"model": "bge-m3", "input": "The food was delicious and the service was excellent."}
+
+=== RAW OUTPUT ===
+{"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}], "model": "bge-m3"}
+
+=== FINAL OUTPUT ===
+{"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}], "model": "bge-m3"}
+========================================
+
+--- TRACE 2026-03-16 09:26:38 ---
+=== INPUT ===
+{"model": "qwen3-coder-flash", "messages": [{"role": "user", "content": "Give me example"}]}
+
+=== RAW OUTPUT ===
+<MagicMock name='post().content' id='140282197337872'>
+
+=== FINAL OUTPUT ===
+{
+  "choices": [
+    {
+      "message": {
+        "content": "Here is bad json: {\"key\": \"value\", }"
+      }
+    }
+  ]
+}
+========================================
+
+--- TRACE 2026-03-16 09:26:38 ---
+=== INPUT ===
+{"model": "qwen3-coder-flash", "stream": true, "messages": []}
+
+=== RAW OUTPUT ===
+<MagicMock name='post().content' id='140282197392720'>
+
+=== FINAL OUTPUT ===
+{
+  "choices": [
+    {
+      "message": {
+        "content": "Normal response",
+        "role": "assistant"
+      }
+    }
+  ]
+}
+========================================
+
+--- TRACE 2026-03-16 09:26:38 ---
+=== INPUT ===
+{"model": "qwen3-coder-flash", "messages": [{"role": "user", "content": "Hi"}], "stream": false}
+
+=== RAW OUTPUT ===
+{"choices": [{"message": {"content": "Python code"}}]}
+
+=== FINAL OUTPUT ===
+{
+  "choices": [
+    {
+      "message": {
+        "content": "Python code"
+      }
+    }
+  ]
+}
+========================================
+
+--- TRACE 2026-03-16 09:26:38 ---
+=== INPUT ===
+{"model": "qwen3-thinking", "stream": false, "messages": []}
+
+=== RAW OUTPUT ===
+{"thinking": "..."}
+
+=== FINAL OUTPUT ===
+{
+  "thinking": "..."
+}
+========================================
+
+--- TRACE 2026-03-16 09:26:38 ---
+=== INPUT ===
+{"model": "qwen3-coder-flash", "stream": false, "messages": [{"role": "user", "content": "Get weather"}]}
+
+=== RAW OUTPUT ===
+<MagicMock name='post().content' id='140282197604176'>
+
+=== FINAL OUTPUT ===
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\": \"Prague\"}"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
+========================================
+

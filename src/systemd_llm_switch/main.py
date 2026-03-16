@@ -97,13 +97,13 @@ def log_trace(input_raw, raw_output, final_output):
                 f.write(input_raw.decode('utf-8', errors='replace'))
             else:
                 f.write(str(input_raw))
-            
+
             f.write("\n\n=== RAW OUTPUT ===\n")
             if isinstance(raw_output, bytes):
                 f.write(raw_output.decode('utf-8', errors='replace'))
             else:
                 f.write(str(raw_output))
-                
+
             f.write("\n\n=== FINAL OUTPUT ===\n")
             if isinstance(final_output, (dict, list)):
                 f.write(json.dumps(final_output, indent=2, ensure_ascii=False))
@@ -137,17 +137,13 @@ def run_systemctl_user(
 # Routing definitions for web.py
 urls = (
     '/v1/chat/completions', 'ChatProxy',
+    '/v1/embeddings', 'EmbeddingsProxy',
     '/v1/models', 'ListModels'
 )
 
 
-class ChatProxy:
-    """Proxy handler for processing LLM API requests with dynamic model
-    switching.
-
-    Manages model activation through systemd services and forwards API requests
-    to the active llama.cpp backend. Uses threading locks to prevent VRAM
-    race conditions during model switching.
+class BaseModelProxy:
+    """Base proxy handler with model switching capabilities.
 
     Attributes:
         _lock: Threading lock to serialize model switching operations.
@@ -168,9 +164,6 @@ class ChatProxy:
 
         Returns:
             True if model was successfully activated, False otherwise.
-
-        Raises:
-            None. Logs errors but does not propagate exceptions.
         """
         target_service = MODELS.get(target_model)
         if not target_service:
@@ -180,16 +173,16 @@ class ChatProxy:
             )
             return False
 
-        with ChatProxy._lock:
+        with BaseModelProxy._lock:
             # 1. If we already have the model registered as active,
             # we do not take any action.
-            if ChatProxy._current_active_model == target_model:
+            if BaseModelProxy._current_active_model == target_model:
                 return True
 
             # 2. Checking the actual status of the service in the system
             status_result = run_systemctl_user("is-active", target_service)
             if status_result.stdout.strip() == "active":
-                ChatProxy._current_active_model = target_model
+                BaseModelProxy._current_active_model = target_model
                 return True
 
             # 3. Switching logic
@@ -209,7 +202,7 @@ class ChatProxy:
                     resp = requests.get(f"{LLAMA_URL}/health", timeout=1)
                     if resp.status_code == 200:
                         logging.info(f"The {target_model} model is ready.")
-                        ChatProxy._current_active_model = target_model
+                        BaseModelProxy._current_active_model = target_model
                         return True
                 except requests.exceptions.RequestException:
                     pass
@@ -221,6 +214,10 @@ class ChatProxy:
 
             logging.error(f"Model {target_model} did not start on time")
             return False
+
+
+class ChatProxy(BaseModelProxy):
+    """Proxy handler for processing LLM chat completion requests."""
 
     def POST(self):
         """Processes incoming chat completions requests.
@@ -249,7 +246,7 @@ class ChatProxy:
             data = json.loads(raw_body)
             # Check if the client requested streaming
             client_wants_stream = data.get("stream", False)
-            
+
             # Force stream=False to ensure we can parse and repair the response
             # regardless of client settings.
             data["stream"] = False
@@ -302,7 +299,7 @@ class ChatProxy:
                                     tool_name
                                 )
                                 func["arguments"] = repair_json(args)
-                
+
                 log_trace(raw_body, raw_resp_content, resp_data)
 
                 if client_wants_stream:
@@ -316,7 +313,7 @@ class ChatProxy:
                         # Convert chat.completion to chat.completion.chunk
                         chunk_data = repaired_data.copy()
                         chunk_data["object"] = "chat.completion.chunk"
-                        
+
                         if (
                             "choices" in chunk_data
                             and len(chunk_data["choices"]) > 0
@@ -342,7 +339,7 @@ class ChatProxy:
                     # Classic JSON response
                     web.header('Content-Type', 'application/json')
                     return json.dumps(resp_data)
-                    
+
             except Exception as e:
                 logging.warning(
                     "Could not parse or repair backend response: %s", e
@@ -362,6 +359,53 @@ class ChatProxy:
             logging.error(
                 f"Unexpected error in POST handler: {e}", exc_info=True
                 )
+            web.ctx.status = "500 Internal Server Error"
+            return json.dumps({"error": str(e)})
+
+
+class EmbeddingsProxy(BaseModelProxy):
+    """Proxy handler for processing LLM embeddings requests."""
+
+    def POST(self):
+        """Processes incoming embeddings requests.
+
+        Switches to the requested model and forwards the request to the active
+        llama.cpp backend.
+        """
+        try:
+            raw_body = web.data()
+            if not raw_body:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "No data provided"})
+
+            data = json.loads(raw_body)
+            target_model = data.get("model")
+
+            logging.info(f"Embeddings request accepted: {target_model}")
+
+            if not self.switch_model(target_model):
+                web.ctx.status = "500 Internal Server Error"
+                return json.dumps(
+                    {"error": f"Failed to activate model {target_model}"}
+                )
+
+            resp = requests.post(
+                f"{LLAMA_URL}/v1/embeddings",
+                json=data,
+                timeout=(10, 600)
+            )
+
+            log_trace(raw_body, resp.content, resp.content)
+            web.header('Content-Type', 'application/json')
+            return resp.content
+
+        except json.JSONDecodeError:
+            web.ctx.status = "400 Bad Request"
+            return json.dumps({"error": "Invalid JSON"})
+        except Exception as e:
+            logging.error(
+                f"Unexpected error in EmbeddingsProxy POST: {e}", exc_info=True
+            )
             web.ctx.status = "500 Internal Server Error"
             return json.dumps({"error": str(e)})
 

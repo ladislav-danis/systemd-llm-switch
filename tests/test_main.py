@@ -39,7 +39,7 @@ class TestModelProxy(unittest.TestCase):
         main.MODELS = main.CONFIG['models']
         main.LLAMA_URL = main.CONFIG['server']['llama_url']
         """Reset status before each test."""
-        main.ChatProxy._current_active_model = None
+        main.BaseModelProxy._current_active_model = None
         main.web.ctx.status = "200 OK"
         main.web._test_data = json.dumps({
             "model": "qwen3-coder-flash",
