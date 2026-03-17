@@ -211,10 +211,13 @@ class TestModelProxy(unittest.TestCase):
             "messages": []
         })
 
-        # Mock start failure
+        # Mock start failure for thinking, but success for rollback to flash
         def side_effect(command, **kwargs):
-            if "start" in command and "qwen3-thinking.service" in command:
+            cmd_str = " ".join(command)
+            if "start" in cmd_str and "qwen3-thinking.service" in cmd_str:
                 return MagicMock(returncode=1, stderr="Failed to start")
+            if "is-active" in cmd_str and "qwen3-coder-flash.service" in cmd_str:
+                return MagicMock(returncode=0, stdout="active")
             return MagicMock(returncode=0, stdout="inactive")
 
         mock_run.side_effect = side_effect
@@ -224,7 +227,7 @@ class TestModelProxy(unittest.TestCase):
 
         self.assertIn("Failed to activate model", result)
 
-        # Check that rollback was attempted (started the flash model again)
+        # Check that rollback was attempted
         calls = [str(c) for c in mock_run.call_args_list]
         self.assertTrue(any(
             "start" in c and "qwen3-coder-flash.service" in c

@@ -117,6 +117,8 @@ def log_trace(
     MAX_LOG_SIZE = 1024 * 1024
 
     def format_data(data):
+        if data is None:
+            return "<NONE>"
         if isinstance(data, (dict, list)):
             text = json.dumps(data, indent=2, ensure_ascii=False)
         elif isinstance(data, bytes):
@@ -226,7 +228,7 @@ class BaseModelProxy:
             for srv in MODELS.values():
                 stop_res = run_systemctl_user("stop", srv)
                 if stop_res.returncode != 0:
-                    logging.warning(
+                    logging.error(
                         f"Failed to stop service {srv}: {stop_res.stderr}"
                     )
 
@@ -297,9 +299,16 @@ class BaseModelProxy:
         prev_service = MODELS[previous_model]
         run_systemctl_user("reset-failed", prev_service)
         run_systemctl_user("start", prev_service)
-        # We don't block with health check here to avoid infinite loops
-        # or excessive delays, just try to restore the service.
-        BaseModelProxy._current_active_model = previous_model
+
+        # Verify if rollback service started
+        time.sleep(1)  # Brief wait
+        status_result = run_systemctl_user("is-active", prev_service)
+        if status_result.stdout.strip() == "active":
+            logging.info(f"Rollback to {previous_model} successful.")
+            BaseModelProxy._current_active_model = previous_model
+        else:
+            logging.error(f"Rollback to {previous_model} failed.")
+            BaseModelProxy._current_active_model = None
 
 
 class ChatProxy(BaseModelProxy):
@@ -370,7 +379,14 @@ class ChatProxy(BaseModelProxy):
             try:
                 resp_data = resp.json()
                 # If it's a chat completion, try to repair the content
-                choices = resp_data.get("choices", [])
+                choices = resp_data.get("choices")
+                if choices is None:
+                    logging.warning(
+                        "Backend response missing 'choices': %s",
+                        resp_data
+                    )
+                    choices = []
+
                 if choices:
                     message = resp_data["choices"][0].get("message", {})
 
@@ -524,6 +540,25 @@ class EmbeddingsProxy(BaseModelProxy):
                 json=data,
                 timeout=(10, 600)
             )
+
+            if resp.status_code != 200:
+                logging.error(
+                    "Embeddings backend returned error %d: %s",
+                    resp.status_code, resp.text
+                )
+                web.ctx.status = f"{resp.status_code} Error"
+                return resp.content
+
+            try:
+                # Basic validation of embeddings response
+                resp_data = resp.json()
+                if "data" not in resp_data:
+                    logging.warning(
+                        "Embeddings response missing 'data' field: %s",
+                        resp_data
+                    )
+            except Exception as e:
+                logging.warning("Could not parse embeddings JSON: %s", e)
 
             log_trace(raw_body, resp.content, resp.content)
             web.header('Content-Type', 'application/json')
