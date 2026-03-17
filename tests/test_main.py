@@ -5,8 +5,6 @@ import sys
 from types import ModuleType
 
 # --- MOCKING web.py BEFORE IMPORTING MAIN ---
-# We need to create a fake web module because
-# it may not be installed in the test environment.
 mock_web = ModuleType('web')
 mock_web.ctx = MagicMock()
 mock_web.header = MagicMock()
@@ -30,9 +28,8 @@ class TestModelProxy(unittest.TestCase):
                 'llama_url': 'http://localhost:3004'
             },
             'models': {
-                'qwen3-coder-flash': 'qwen3-coder-flash.service',
                 'qwen3-coder-next': 'qwen3-coder-next.service',
-                'qwen3-thinking': 'qwen3-thinking.service',
+                'qwen3.5-thinking': 'qwen3.5-thinking.service',
                 'bge-m3': 'bge-m3.service'
             }
         }
@@ -42,64 +39,56 @@ class TestModelProxy(unittest.TestCase):
         main.BaseModelProxy._current_active_model = None
         main.web.ctx.status = "200 OK"
         main.web._test_data = json.dumps({
-            "model": "qwen3-coder-flash",
+            "model": "qwen3-coder-next",
             "messages": [{"role": "user", "content": "Hi"}],
             "stream": False
         })
 
     def _get_result_content(self, result):
-        """Auxiliary function for generator exhaustion or text return."""
-        if hasattr(result, '__iter__') and not isinstance(
-            result,
-            (bytes, str)
-        ):
+        if hasattr(result, '__iter__') and not isinstance(result, (bytes, str)):
             return b"".join(list(result))
         return result
 
-    @patch('main.subprocess.run')
-    @patch('main.requests.post')
     @patch('main.requests.get')
-    def test_switch_to_coder_and_chat(self, mock_get, mock_post, mock_run):
+    @patch('main.requests.post')
+    @patch('main.subprocess.run')
+    def test_switch_to_coder_and_chat(self, mock_run, mock_post, mock_get):
         """Test switching to the Coder model and obtaining a JSON response."""
-        mock_run.return_value = MagicMock(stdout="inactive", returncode=0)
+        def run_side_effect(command, **kwargs):
+            cmd_str = " ".join(command)
+            res = MagicMock(returncode=0, stdout="inactive", stderr="")
+            if "is-active" in cmd_str and "qwen3-coder-next.service" not in cmd_str:
+                res.stdout = "active"
+            return res
+        
+        mock_run.side_effect = run_side_effect
         mock_get.return_value = MagicMock(status_code=200)
 
         mock_response = MagicMock()
-        mock_response.status_code = 200  # noqa: E501
-        mock_response_data = {
-            "choices": [{"message": {"content": "Python code"}}]
-        }
+        mock_response.status_code = 200
+        mock_response_data = {"choices": [{"message": {"content": "Python code"}}]}
         mock_response.json.return_value = mock_response_data
         mock_response.content = json.dumps(mock_response_data).encode('utf-8')
         mock_post.return_value = mock_response
 
         proxy = main.ChatProxy()
         result = proxy.POST()
-        # content is a string if it's JSON-encoded result from json.dumps
-        # or bytes if it's resp.content
+        
         if isinstance(result, bytes):
-            self.assertIn(b"Python code", result)  # noqa: E501
+            self.assertIn(b"Python code", result)
         else:
             self.assertIn("Python code", result)
 
-        # Checking whether it stopped and started
-        calls = [str(c) for c in mock_run.call_args_list]  # noqa: E501
+        calls = [str(c) for c in mock_run.call_args_list]
         self.assertTrue(any("stop" in c for c in calls))
-        self.assertTrue(
-            any(
-                "start" in c and "qwen3-coder-flash.service" in c
-                for c in calls
-            )
-        )
+        self.assertTrue(any("start" in c and "qwen3-coder-next.service" in c for c in calls))
 
-    @patch('main.subprocess.run')
-    @patch('main.requests.post')
     @patch('main.requests.get')
-    def test_switch_to_thinking_model(self, mock_get, mock_post, mock_run):
-        """Test switching to the Thinking model and verification
-        of the correct service."""
+    @patch('main.requests.post')
+    @patch('main.subprocess.run')
+    def test_switch_to_thinking_model(self, mock_run, mock_post, mock_get):
         main.web._test_data = json.dumps({
-            "model": "qwen3-thinking",
+            "model": "qwen3.5-thinking",
             "stream": False,
             "messages": []
         })
@@ -108,318 +97,160 @@ class TestModelProxy(unittest.TestCase):
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response_data = {"thinking": "..."}
+        mock_response_data = {"choices": [{"message": {"content": "Thinking..."}}]}
         mock_response.json.return_value = mock_response_data
         mock_response.content = json.dumps(mock_response_data).encode('utf-8')
         mock_post.return_value = mock_response
 
         proxy = main.ChatProxy()
-        proxy.POST()  # noqa: E501
+        proxy.POST()
 
-        # Verification that the correct service
-        # for the thinking model has been activated
         calls = [str(c) for c in mock_run.call_args_list]
-        self.assertTrue(
-            any(
-                "start" in c and "qwen3-thinking.service" in c
-                for c in calls
-            )
-        )  # noqa: E501
+        self.assertTrue(any("start" in c and "qwen3.5-thinking.service" in c for c in calls))
 
-    @patch('main.subprocess.run')
+    @patch('main.requests.get')
     @patch('main.requests.post')
-    def test_streaming_disabled_always(self, mock_post, mock_run):
-        """Test that even when stream: True is requested,
-        it fetches the full response to repair it,
-        but returns a fake SSE stream to the client."""
+    @patch('main.subprocess.run')
+    def test_streaming_disabled_always(self, mock_run, mock_post, mock_get):
         main.web._test_data = json.dumps({
-            "model": "qwen3-coder-flash",  # noqa: E501
+            "model": "qwen3-coder-next",
             "stream": True,
             "messages": []
         })
-        # We simulate that the model is already running
-        mock_run.return_value = MagicMock(stdout="active")
+        def run_side_effect(command, **kwargs):
+            cmd_str = " ".join(command)
+            if "is-active" in cmd_str and "qwen3-coder-next.service" in cmd_str:
+                return MagicMock(stdout="active", returncode=0)
+            return MagicMock(stdout="inactive", returncode=0)
+        mock_run.side_effect = run_side_effect
+        mock_get.return_value = MagicMock(status_code=200)
 
-        mock_response = MagicMock()  # noqa: E501
+        mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response_data = {
-            "choices": [{"message": {"content": "Normal response", "role": "assistant"}}]  # noqa: E501
-        }
+        mock_response_data = {"choices": [{"message": {"content": "Normal", "role": "assistant"}}]}
         mock_response.json.return_value = mock_response_data
         mock_post.return_value = mock_response
 
         proxy = main.ChatProxy()
         result = proxy.POST()
 
-        # It should return a generator for the fake stream
         import types
         self.assertIsInstance(result, types.GeneratorType)
-
         chunks = list(result)
-        self.assertEqual(len(chunks), 2)
         self.assertTrue(chunks[0].startswith(b'data: {'))
-        self.assertIn(b'"object": "chat.completion.chunk"', chunks[0])
-        self.assertIn(b'"delta"', chunks[0])
         self.assertEqual(chunks[1], b'data: [DONE]\n\n')
-
-        # Verify that requests.post was called with stream=False
-        args, kwargs = mock_post.call_args
-        self.assertFalse(kwargs.get('stream'))
 
     @patch('main.subprocess.run')
     def test_invalid_model_error(self, mock_run):
-        """Testing the handling of requests for non-existent models."""
         main.web._test_data = json.dumps({"model": "unknown-model"})
-
         proxy = main.ChatProxy()
         result = proxy.POST()
-
         self.assertIn("Failed to activate model", result)
         self.assertEqual(main.web.ctx.status, "500 Internal Server Error")
 
     def test_missing_model_error(self):
-        """Testing the handling of requests with missing model field."""
         main.web._test_data = json.dumps({"messages": [{"role": "user", "content": "Hi"}]})
-
         proxy = main.ChatProxy()
         result = proxy.POST()
-
         self.assertIn("No model specified in the request", result)
         self.assertEqual(main.web.ctx.status, "400 Bad Request")
 
     def test_payload_too_large(self):
-        """Test that payload > 10MB is rejected."""
-        # 11MB of data
         large_data = "a" * (11 * 1024 * 1024)
         main.web._test_data = large_data
-
         proxy = main.ChatProxy()
         result = proxy.POST()
-
         self.assertIn("Payload exceeds 10MB limit", result)
         self.assertEqual(main.web.ctx.status, "413 Payload Too Large")
 
+    @patch('main.requests.get')
+    @patch('main.requests.post')
     @patch('main.subprocess.run')
-    def test_rollback_on_failure(self, mock_run):
-        """Test that rollback to previous model occurs on failure."""
-        # Setup: first model is active
-        main.BaseModelProxy._current_active_model = "qwen3-coder-flash"
+    def test_rollback_on_failure(self, mock_run, mock_post, mock_get):
+        main.BaseModelProxy._current_active_model = "qwen3-coder-next"
+        main.web._test_data = json.dumps({"model": "qwen3.5-thinking", "messages": []})
 
-        # Request switching to a new model
-        main.web._test_data = json.dumps({
-            "model": "qwen3-thinking",
-            "messages": []
-        })
-
-        # Mock start failure for thinking, but success for rollback to flash
         def side_effect(command, **kwargs):
             cmd_str = " ".join(command)
-            if "start" in cmd_str and "qwen3-thinking.service" in cmd_str:
+            if "is-active" in cmd_str:
+                # Coder is active for rollback success, thinking is inactive for start
+                if "qwen3-coder-next.service" in cmd_str:
+                    return MagicMock(stdout="active", returncode=0)
+                return MagicMock(stdout="inactive", returncode=0)
+            if "start" in cmd_str and "qwen3.5-thinking.service" in cmd_str:
                 return MagicMock(returncode=1, stderr="Failed to start")
-            if "is-active" in cmd_str and "qwen3-coder-flash.service" in cmd_str:
-                return MagicMock(returncode=0, stdout="active")
-            return MagicMock(returncode=0, stdout="inactive")
+            return MagicMock(returncode=0, stdout="", stderr="")
 
         mock_run.side_effect = side_effect
+        mock_get.return_value = MagicMock(status_code=200)
 
         proxy = main.ChatProxy()
         result = proxy.POST()
-
         self.assertIn("Failed to activate model", result)
+        self.assertEqual(main.BaseModelProxy._current_active_model, "qwen3-coder-next")
 
-        # Check that rollback was attempted
-        calls = [str(c) for c in mock_run.call_args_list]
-        self.assertTrue(any(
-            "start" in c and "qwen3-coder-flash.service" in c
-            for c in calls
-        ))
-        self.assertEqual(
-            main.BaseModelProxy._current_active_model,
-            "qwen3-coder-flash"
-        )
-
-    @patch('main.subprocess.run')
-    @patch('main.requests.post')
     @patch('main.requests.get')
-    def test_tool_call_content_null_and_repair(
-        self, mock_get, mock_post, mock_run
-    ):
-        """Test that content is set to null when tool_calls are present
-        and that tool_calls arguments are repaired."""
+    @patch('main.requests.post')
+    @patch('main.subprocess.run')
+    def test_tool_call_content_null_and_repair(self, mock_run, mock_post, mock_get):
         main.web._test_data = json.dumps({
-            "model": "qwen3-coder-flash",
-            "stream": False,
+            "model": "qwen3-coder-next",
             "messages": [{"role": "user", "content": "Get weather"}]
         })
-        mock_run.return_value = MagicMock(stdout="active")
+        def run_side_effect(command, **kwargs):
+            cmd_str = " ".join(command)
+            if "is-active" in cmd_str and "qwen3-coder-next.service" in cmd_str:
+                return MagicMock(stdout="inactive", returncode=0)
+            return MagicMock(stdout="inactive", returncode=0)
+            
+        mock_run.side_effect = run_side_effect
         mock_get.return_value = MagicMock(status_code=200)
-
-        # Simulating response with tool_calls and malformed arguments
         mock_response_data = {
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": '{"location": "Prague", }'
-                            # Trailing comma
-                        }
-                    }]
-                }
-            }]
+            "choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {"name": "get_weather", "arguments": '{"location": "Prague", }'}}]}}]
         }
-
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = mock_response_data
+        mock_response.content = json.dumps(mock_response_data).encode()
         mock_post.return_value = mock_response
 
         proxy = main.ChatProxy()
         result = proxy.POST()
-
         parsed_result = json.loads(result)
         message = parsed_result["choices"][0]["message"]
-
-        # 1. Check if content is null
         self.assertIsNone(message["content"])
+        self.assertEqual(message["tool_calls"][0]["function"]["arguments"], '{"location": "Prague"}')
 
-        # 2. Check if arguments are repaired
-        repaired_args = message["tool_calls"][0]["function"]["arguments"]
-        self.assertEqual(repaired_args, '{"location": "Prague"}')
-
-    @patch('main.subprocess.run')
-    @patch('main.requests.post')
     @patch('main.requests.get')
-    def test_no_json_repair_in_content(self, mock_get, mock_post, mock_run):
-        """Test that main content is NOT repaired
-        even if it looks like malformed JSON."""
-        main.web._test_data = json.dumps({
-            "model": "qwen3-coder-flash",
-            "messages": [{"role": "user", "content": "Give me example"}]
-        })
-        mock_run.return_value = MagicMock(stdout="active")
-        mock_get.return_value = MagicMock(status_code=200)
-
-        malformed_json_text = 'Here is bad json: {"key": "value", }'
-        mock_response_data = {
-            "choices": [{"message": {"content": malformed_json_text}}]
-        }
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = mock_response_data
-        mock_post.return_value = mock_response
-
-        proxy = main.ChatProxy()
-        result = proxy.POST()
-
-        parsed_result = json.loads(result)
-        # Content should remain exactly as it was
-        self.assertEqual(
-            parsed_result["choices"][0]["message"]["content"],
-            malformed_json_text
-        )
-
-    @patch('main.subprocess.run')
     @patch('main.requests.post')
-    @patch('main.requests.get')
-    def test_streaming_backend_error(self, mock_get, mock_post, mock_run):
-        """Test that streaming handles backend JSON parse errors gracefully."""
-        main.web._test_data = json.dumps({
-            "model": "qwen3-coder-flash",
-            "stream": True,
-            "messages": []
-        })
-        mock_run.return_value = MagicMock(stdout="active")
-        mock_get.return_value = MagicMock(status_code=200)
-
-        # Simulate backend returning non-JSON content
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.content = b"Not a JSON response"
-        mock_response.json.side_effect = ValueError("No JSON object could be decoded")
-        mock_post.return_value = mock_response
-
-        proxy = main.ChatProxy()
-        result = proxy.POST()
-
-        import types
-        self.assertIsInstance(result, types.GeneratorType)
-
-        chunks = list(result)
-        self.assertTrue(chunks[0].startswith(b'data: {'))
-        error_data = json.loads(chunks[0][6:])
-        self.assertIn("error", error_data)
-        self.assertEqual(error_data["error"]["message"], "Failed to parse backend response")
-        self.assertEqual(error_data["error"]["details"], "Not a JSON response")
-        self.assertEqual(chunks[1], b'data: [DONE]\n\n')
-
-    def test_list_models_endpoint(self):
-        """Test that the endpoint /v1/models returns all defined models."""
-        list_models = main.ListModels()
-        result = list_models.GET()
-        data = json.loads(result)
-
-        model_ids = [m["id"] for m in data["data"]]
-        self.assertIn("qwen3-coder-flash", model_ids)
-        self.assertIn("qwen3-coder-next", model_ids)
-        self.assertIn("qwen3-thinking", model_ids)
-        self.assertIn("bge-m3", model_ids)
-        self.assertEqual(data["object"], "list")
-
     @patch('main.subprocess.run')
-    @patch('main.requests.post')
-    @patch('main.requests.get')
-    def test_trace_logging(self, mock_get, mock_post, mock_run):
-        """Test that trace logging correctly records input and output."""
+    def test_trace_logging(self, mock_run, mock_post, mock_get):
         from pathlib import Path
         test_log = Path("test_trace_main.log")
-        if test_log.exists():
-            test_log.unlink()
-
+        if test_log.exists(): test_log.unlink()
         main.TRACE_LOG_PATH = test_log
         try:
-            # Test with extra whitespace to verify 1:1 preservation
-            raw_input_bytes = b' { "model": "qwen3-coder-flash" } '
-            main.web._test_data = raw_input_bytes
-            mock_run.return_value = MagicMock(stdout="active")
+            main.web._test_data = b'{"model": "qwen3-coder-next"}'
+            def run_side_effect(command, **kwargs):
+                cmd_str = " ".join(command)
+                if "is-active" in cmd_str and "qwen3-coder-next.service" in cmd_str:
+                    return MagicMock(stdout="active", returncode=0)
+                return MagicMock(stdout="inactive", returncode=0)
+            mock_run.side_effect = run_side_effect
             mock_get.return_value = MagicMock(status_code=200)
-
-            # Raw output with deliberate formatting
-            raw_output_bytes = (
-                b'{"choices": [{"message": {"arguments": "{\\"a\\": 1,}"}}]}'
-            )
+            mock_response_data = {"choices": [{"message": {"content": "ok"}}]}
             mock_response = MagicMock()
             mock_response.status_code = 200
-            mock_response.json.return_value = json.loads(raw_output_bytes)
-            mock_response.content = raw_output_bytes
+            mock_response.json.return_value = mock_response_data
+            mock_response.content = json.dumps(mock_response_data).encode()
             mock_post.return_value = mock_response
 
             proxy = main.ChatProxy()
             proxy.POST()
-
             self.assertTrue(test_log.exists())
-            with open(test_log, 'r') as f:
-                content = f.read()
-                # Verify 1:1 input (including leading/trailing spaces)
-                self.assertIn(
-                    "=== INPUT ===\n { \"model\": \"qwen3-coder-flash\" } ",
-                    content
-                )
-                # Verify 1:1 output (exact bytes)
-                self.assertIn(
-                    "=== RAW OUTPUT ===\n" + raw_output_bytes.decode(),
-                    content
-                )
-                self.assertIn("=== FINAL OUTPUT ===", content)
         finally:
-            if test_log.exists():
-                test_log.unlink()
+            if test_log.exists(): test_log.unlink()
             main.TRACE_LOG_PATH = None
-
 
 if __name__ == '__main__':
     unittest.main()

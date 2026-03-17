@@ -226,17 +226,22 @@ class BaseModelProxy:
 
             # Stop all models (release VRAM)
             for srv in MODELS.values():
-                stop_res = run_systemctl_user("stop", srv)
-                if stop_res.returncode != 0:
-                    logging.error(
-                        f"Failed to stop service {srv}: {stop_res.stderr}"
-                    )
+                # Only stop if it's active or activating to avoid race condition errors
+                check_active = run_systemctl_user("is-active", srv)
+                if check_active.stdout.strip() in ("active", "activating"):
+                    stop_res = run_systemctl_user("stop", srv)
+                    if stop_res.returncode != 0:
+                        logging.error(
+                            f"Failed to stop service {srv}: {stop_res.stderr}"
+                        )
 
             # Reset state after stopping everything
             BaseModelProxy._current_active_model = None
 
-            # Reset failed state for target service
-            run_systemctl_user("reset-failed", target_service)
+            # Reset failed state for target service only if it was failed
+            check_failed = run_systemctl_user("is-failed", target_service)
+            if check_failed.returncode == 0:  # 0 means it IS failed in some versions
+                run_systemctl_user("reset-failed", target_service)
 
             # Start selected model
             logging.info(f"I am starting the service: {target_service}")
@@ -250,41 +255,44 @@ class BaseModelProxy:
                 return False
 
             # 4. Health check - waiting for API to start (max 120s)
-            success = False
-            for _ in range(120):
-                try:
-                    # Check health endpoint
-                    resp = requests.get(f"{LLAMA_URL}/health", timeout=1)
-                    if resp.status_code == 200:
-                        # Double check with models endpoint to ensure full readiness
-                        models_resp = requests.get(
-                            f"{LLAMA_URL}/v1/models",
-                            timeout=1
-                        )
-                        if models_resp.status_code == 200:
-                            logging.info(f"The {target_model} model is ready.")
-                            BaseModelProxy._current_active_model = target_model
-                            success = True
-                            break
-                        else:
-                            logging.warning(
-                                f"Health OK but /v1/models returned "
-                                f"{models_resp.status_code}"
-                            )
-                except requests.exceptions.RequestException:
-                    pass
-                time.sleep(1)
-                if _ % 5 == 0:
-                    logging.info(
-                        f"Waiting for the model to start {target_model}..."
-                    )
+            success = self._wait_for_ready(target_model, timeout=120)
 
             if not success:
                 logging.error(f"Model {target_model} did not start on time")
                 self._rollback(previous_model)
                 return False
 
+            BaseModelProxy._current_active_model = target_model
             return True
+
+    def _wait_for_ready(self, model_name: str, timeout: int = 120) -> bool:
+        """Waits for the model's API to be ready.
+
+        Args:
+            model_name: Name of the model to check.
+            timeout: Maximum time to wait in seconds.
+
+        Returns:
+            True if ready, False otherwise.
+        """
+        for _ in range(timeout):
+            try:
+                # Check health endpoint
+                resp = requests.get(f"{LLAMA_URL}/health", timeout=1)
+                if resp.status_code == 200:
+                    # Double check with models endpoint to ensure full readiness
+                    models_resp = requests.get(
+                        f"{LLAMA_URL}/v1/models",
+                        timeout=1
+                    )
+                    if models_resp.status_code == 200:
+                        return True
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(1)
+            if _ % 5 == 0:
+                logging.info(f"Waiting for {model_name} to be ready...")
+        return False
 
     def _rollback(self, previous_model: Optional[str]) -> None:
         """Attempts to restore the previously active model if switch fails.
@@ -300,10 +308,8 @@ class BaseModelProxy:
         run_systemctl_user("reset-failed", prev_service)
         run_systemctl_user("start", prev_service)
 
-        # Verify if rollback service started
-        time.sleep(1)  # Brief wait
-        status_result = run_systemctl_user("is-active", prev_service)
-        if status_result.stdout.strip() == "active":
+        # Verify rollback with a shorter health check (max 30s)
+        if self._wait_for_ready(f"Rollback:{previous_model}", timeout=30):
             logging.info(f"Rollback to {previous_model} successful.")
             BaseModelProxy._current_active_model = previous_model
         else:
@@ -465,12 +471,13 @@ class ChatProxy(BaseModelProxy):
                 logging.warning(
                     "Could not parse or repair backend response: %s", e
                 )
-                log_trace(
-                    raw_body,
-                    raw_resp_content,
-                    f"ERROR: {e}\nORIGINAL CONTENT: "
-                    f"{raw_resp_content.decode('utf-8', errors='replace')}",
-                )
+                error_detail = f"ERROR: {e}"
+                if raw_resp_content is not None:
+                    error_detail += (
+                        "\nORIGINAL CONTENT: "
+                        + raw_resp_content.decode('utf-8', errors='replace')
+                    )
+                log_trace(raw_body, raw_resp_content, error_detail)
 
                 if client_wants_stream:
                     web.header('Content-Type', 'text/event-stream')
@@ -549,6 +556,16 @@ class EmbeddingsProxy(BaseModelProxy):
                 web.ctx.status = f"{resp.status_code} Error"
                 return resp.content
 
+            # Response size limit for embeddings (50 MB)
+            if len(resp.content) > 50 * 1024 * 1024:
+                logging.error(
+                    "Embeddings response too large: %d bytes",
+                    len(resp.content)
+                )
+                web.ctx.status = "502 Bad Gateway"
+                return json.dumps({"error": "Response from backend too large"})
+
+            resp_data = None
             try:
                 # Basic validation of embeddings response
                 resp_data = resp.json()
@@ -560,7 +577,7 @@ class EmbeddingsProxy(BaseModelProxy):
             except Exception as e:
                 logging.warning("Could not parse embeddings JSON: %s", e)
 
-            log_trace(raw_body, resp.content, resp.content)
+            log_trace(raw_body, resp.content, resp_data or resp.content)
             web.header('Content-Type', 'application/json')
             return resp.content
 
