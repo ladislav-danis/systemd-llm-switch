@@ -112,14 +112,18 @@ def log_trace(
     if not TRACE_LOG_PATH:
         return
 
-    # Maximum size for full logging (1 MB)
-    MAX_LOG_SIZE = 1024 * 1024
-
     def format_data(data):
         if data is None:
             return "<NONE>"
+        
+        # Maximum size for full logging (1 MB)
+        MAX_LOG_SIZE = 1024 * 1024
+
         if isinstance(data, (dict, list)):
-            text = json.dumps(data, indent=2, ensure_ascii=False)
+            try:
+                text = json.dumps(data, indent=2, ensure_ascii=False)
+            except Exception:
+                text = str(data)
         elif isinstance(data, bytes):
             if len(data) > MAX_LOG_SIZE:
                 return f"<BINARY DATA: {len(data)} bytes, TOO LARGE TO LOG>"
@@ -128,7 +132,7 @@ def log_trace(
             text = str(data)
 
         if len(text) > MAX_LOG_SIZE:
-            return f"<DATA: {len(text)} characters, TOO LARGE TO LOG>"
+            return f"<DATA: {len(text)} characters, TOO LARGE TO LOG (truncated)>"
         return text
 
     try:
@@ -150,7 +154,8 @@ def log_trace(
 def run_systemctl_user(
     action: str,
     service: str,
-    now: bool = False
+    now: bool = False,
+    timeout: int = 30
 ) -> subprocess.CompletedProcess:
     """Executes a systemctl --user command for the specified service.
 
@@ -158,6 +163,7 @@ def run_systemctl_user(
         action: The action to perform (e.g., 'start', 'stop', 'is-active').
         service: The service name to operate on.
         now: If True, adds --now flag (for stop/start).
+        timeout: Maximum time to wait for the command.
 
     Returns:
         A CompletedProcess object containing the command execution results.
@@ -166,7 +172,16 @@ def run_systemctl_user(
     if now and action in ("start", "stop", "restart"):
         command.append("--now")
     command.append(service)
-    return subprocess.run(command, capture_output=True, text=True)
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logging.error(f"Command '{' '.join(command)}' timed out after {timeout}s")
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=124,
+            stdout="",
+            stderr="Command timed out"
+        )
 
 
 # Routing definitions for web.py
@@ -194,7 +209,7 @@ class BaseModelProxy:
         Returns:
             The parsed JSON data if valid, None otherwise (sets web.ctx.status).
         """
-        # Ensure _raw_body is initialized to avoid AttributeError later
+        # Ensure _raw_body is initialized
         web.ctx._raw_body = None
         raw_body = None
         try:
@@ -215,10 +230,6 @@ class BaseModelProxy:
 
             if not target_model:
                 web.ctx.status = "400 Bad Request"
-                return None
-
-            if not self.switch_model(target_model):
-                web.ctx.status = "500 Internal Server Error"
                 return None
 
             return data
@@ -399,143 +410,148 @@ class ChatProxy(BaseModelProxy):
         """
         data = self._get_validated_data()
         if data is None:
-            # Status and error trace already handled in _get_validated_data
             if web.ctx.status.startswith("400"):
                 return json.dumps({"error": "Invalid request or missing model"})
-            return json.dumps({"error": f"Failed to activate model"})
+            return json.dumps({"error": "Failed to parse request"})
 
         raw_body = web.ctx._raw_body
-        try:
-            # Check if the client requested streaming
-            client_wants_stream = data.get("stream", False)
+        target_model = data.get("model")
 
-            # Force stream=False to ensure we can parse and repair the response
-            # regardless of client settings.
-            data["stream"] = False
-
-            # Forwarding the request to the llama.cpp backend
-            resp = requests.post(
-                f"{LLAMA_URL}/v1/chat/completions",
-                json=data,
-                stream=False,
-                timeout=(10, 1800)
-            )
-
-            raw_resp_content = resp.content
+        # Entire request-response cycle is locked to prevent race conditions
+        with BaseModelProxy._lock:
             try:
-                resp_data = resp.json()
-                # If it's a chat completion, try to repair the content
-                choices = resp_data.get("choices", [])
-                
-                for choice in choices:
-                    message = choice.get("message", {})
+                # 1. Switch to the requested model
+                if not self.switch_model(target_model):
+                    web.ctx.status = "500 Internal Server Error"
+                    return json.dumps({"error": f"Failed to activate model {target_model}"})
 
-                    # 1. Ensure content is null if tool_calls present
-                    #    (standard OpenAI)
-                    tool_calls = message.get("tool_calls", [])
-                    if tool_calls and not message.get("content"):
-                        message["content"] = None
+                # 2. Prepare the request
+                client_wants_stream = data.get("stream", False)
+                data["stream"] = False
 
-                    # 2. Repair tool_calls arguments if present
-                    for tool in tool_calls:
-                        func = tool.get("function", {})
-                        args = func.get("arguments")
-                        if args:
-                            try:
-                                json.loads(args)
-                            except (json.JSONDecodeError, TypeError):
-                                tool_name = func.get("name", "unknown")
-                                logging.info(
-                                    "Repairing JSON in tool '%s' args",
-                                    tool_name
-                                )
-                                repaired_args = repair_json(args)
+                # 3. Forwarding the request to the llama.cpp backend
+                resp = requests.post(
+                    f"{LLAMA_URL}/v1/chat/completions",
+                    json=data,
+                    stream=False,
+                    timeout=(10, 1800)
+                )
+
+                raw_resp_content = resp.content
+                try:
+                    resp_data = resp.json()
+                    # If it's a chat completion, try to repair the content
+                    choices = resp_data.get("choices", [])
+                    
+                    for choice in choices:
+                        message = choice.get("message", {})
+
+                        # 1. Ensure content is null if tool_calls present
+                        #    (standard OpenAI)
+                        tool_calls = message.get("tool_calls", [])
+                        if tool_calls and not message.get("content"):
+                            message["content"] = None
+
+                        # 2. Repair tool_calls arguments if present
+                        for tool in tool_calls:
+                            func = tool.get("function", {})
+                            args = func.get("arguments")
+                            if args:
                                 try:
-                                    # Verify if the repair actually produced
-                                    # valid JSON
-                                    json.loads(repaired_args)
-                                    func["arguments"] = repaired_args
-                                except json.JSONDecodeError:
-                                    logging.warning(
-                                        "Repair failed for tool '%s'",
+                                    json.loads(args)
+                                except (json.JSONDecodeError, TypeError):
+                                    tool_name = func.get("name", "unknown")
+                                    logging.info(
+                                        "Repairing JSON in tool '%s' args",
                                         tool_name
                                     )
+                                    repaired_args = repair_json(args)
+                                    try:
+                                        # Verify if the repair actually produced
+                                        # valid JSON
+                                        json.loads(repaired_args)
+                                        func["arguments"] = repaired_args
+                                    except json.JSONDecodeError:
+                                        logging.warning(
+                                            "Repair failed for tool '%s'",
+                                            tool_name
+                                        )
 
-                log_trace(raw_body, raw_resp_content, resp_data)
+                    log_trace(raw_body, raw_resp_content, resp_data)
 
-                if client_wants_stream:
-                    # Client requested a stream, so we must fake an SSE stream
-                    web.header('Content-Type', 'text/event-stream')
-                    web.header('Cache-Control', 'no-cache')
-                    web.header('Connection', 'keep-alive')
-                    web.header('X-Accel-Buffering', 'no')
+                    if client_wants_stream:
+                        # Client requested a stream, so we must fake an SSE stream
+                        web.header('Content-Type', 'text/event-stream')
+                        web.header('Cache-Control', 'no-cache')
+                        web.header('Connection', 'keep-alive')
+                        web.header('X-Accel-Buffering', 'no')
 
-                    def fake_stream(repaired_data):
-                        # Convert chat.completion to chat.completion.chunk
-                        chunk_data = repaired_data.copy()
-                        chunk_data["object"] = "chat.completion.chunk"
+                        def fake_stream(repaired_data):
+                            # Convert chat.completion to chat.completion.chunk
+                            chunk_data = repaired_data.copy()
+                            chunk_data["object"] = "chat.completion.chunk"
 
-                        choices = chunk_data.get("choices", [])
-                        if choices:
-                            choice = choices[0]
-                            if "message" in choice:
-                                choice["delta"] = choice.pop("message")
-                                # OpenAI stream format for tool_calls
-                                # uses index
-                                if "tool_calls" in choice["delta"]:
-                                    for i, tc in enumerate(
-                                        choice["delta"]["tool_calls"]
-                                    ):
-                                        tc["index"] = i
+                            choices_list = chunk_data.get("choices", [])
+                            if choices_list:
+                                choice = choices_list[0]
+                                if "message" in choice:
+                                    choice["delta"] = choice.pop("message")
+                                    # OpenAI stream format for tool_calls
+                                    # uses index
+                                    if "tool_calls" in choice["delta"]:
+                                        for i, tc in enumerate(
+                                            choice["delta"]["tool_calls"]
+                                        ):
+                                            tc["index"] = i
 
-                        yield (
-                            f"data: {json.dumps(chunk_data)}\n\n"
-                        ).encode('utf-8')
-                        yield b"data: [DONE]\n\n"
+                            yield (
+                                f"data: {json.dumps(chunk_data)}\n\n"
+                            ).encode('utf-8')
+                            yield b"data: [DONE]\n\n"
 
-                    return fake_stream(resp_data)
-                else:
-                    # Classic JSON response
-                    web.header('Content-Type', 'application/json')
-                    return json.dumps(resp_data)
+                        return fake_stream(resp_data)
+                    else:
+                        # Classic JSON response
+                        web.header('Content-Type', 'application/json')
+                        return json.dumps(resp_data)
+
+                except Exception as e:
+                    logging.warning(
+                        "Could not parse or repair backend response: %s", e
+                    )
+                    error_detail = f"ERROR: {e}"
+                    if raw_resp_content is not None:
+                        error_detail += (
+                            "\nORIGINAL CONTENT: "
+                            + raw_resp_content.decode('utf-8', errors='replace')
+                        )
+                    log_trace(raw_body, raw_resp_content, error_detail)
+
+                    if client_wants_stream:
+                        web.header('Content-Type', 'text/event-stream')
+                        def stream_error(content):
+                            err_msg = {
+                                "error": {
+                                    "message": "Failed to parse backend response",
+                                    "details": content.decode(
+                                        'utf-8', errors='replace'
+                                    )
+                                }
+                            }
+                            yield f"data: {json.dumps(err_msg)}\n\n".encode('utf-8')
+                            yield b"data: [DONE]\n\n"
+                        return stream_error(raw_resp_content)
+
+                    return resp.content
 
             except Exception as e:
-                logging.warning(
-                    "Could not parse or repair backend response: %s", e
-                )
-                error_detail = f"ERROR: {e}"
-                if raw_resp_content is not None:
-                    error_detail += (
-                        "\nORIGINAL CONTENT: "
-                        + raw_resp_content.decode('utf-8', errors='replace')
+                logging.error(
+                    f"Unexpected error in POST handler: {e}", exc_info=True
                     )
-                log_trace(raw_body, raw_resp_content, error_detail)
-
-                if client_wants_stream:
-                    web.header('Content-Type', 'text/event-stream')
-                    def stream_error(content):
-                        err_msg = {
-                            "error": {
-                                "message": "Failed to parse backend response",
-                                "details": content.decode(
-                                    'utf-8', errors='replace'
-                                )
-                            }
-                        }
-                        yield f"data: {json.dumps(err_msg)}\n\n".encode('utf-8')
-                        yield b"data: [DONE]\n\n"
-                    return stream_error(raw_resp_content)
-
-                return resp.content
-
-        except Exception as e:
-            logging.error(
-                f"Unexpected error in POST handler: {e}", exc_info=True
-                )
-            web.ctx.status = "500 Internal Server Error"
-            err_msg = {"error": str(e)}
-            log_trace(raw_body, None, err_msg)
-            return json.dumps(err_msg)
+                web.ctx.status = "500 Internal Server Error"
+                err_msg = {"error": str(e)}
+                log_trace(raw_body, None, err_msg)
+                return json.dumps(err_msg)
 
 
 class EmbeddingsProxy(BaseModelProxy):
@@ -551,60 +567,70 @@ class EmbeddingsProxy(BaseModelProxy):
         if data is None:
             if web.ctx.status.startswith("400"):
                 return json.dumps({"error": "Invalid request or missing model"})
-            return json.dumps({"error": f"Failed to activate model"})
+            return json.dumps({"error": "Failed to parse request"})
 
         raw_body = web.ctx._raw_body
-        try:
-            resp = requests.post(
-                f"{LLAMA_URL}/v1/embeddings",
-                json=data,
-                timeout=(10, 600)
-            )
+        target_model = data.get("model")
 
-            if resp.status_code != 200:
-                logging.error(
-                    "Embeddings backend returned error %d: %s",
-                    resp.status_code, resp.text
+        # Entire request-response cycle is locked to prevent race conditions
+        with BaseModelProxy._lock:
+            try:
+                # 1. Switch to the requested model
+                if not self.switch_model(target_model):
+                    web.ctx.status = "500 Internal Server Error"
+                    return json.dumps({"error": f"Failed to activate model {target_model}"})
+
+                # 2. Forwarding the request to the llama.cpp backend
+                resp = requests.post(
+                    f"{LLAMA_URL}/v1/embeddings",
+                    json=data,
+                    timeout=(10, 600)
                 )
-                web.ctx.status = f"{resp.status_code} Error"
-                log_trace(raw_body, resp.content, f"BACKEND ERROR: {resp.status_code}")
+
+                if resp.status_code != 200:
+                    logging.error(
+                        "Embeddings backend returned error %d: %s",
+                        resp.status_code, resp.text
+                    )
+                    web.ctx.status = f"{resp.status_code} Error"
+                    log_trace(raw_body, resp.content, f"BACKEND ERROR: {resp.status_code}")
+                    return resp.content
+
+                # Response size limit for embeddings (50 MB)
+                if len(resp.content) > 50 * 1024 * 1024:
+                    logging.error(
+                        "Embeddings response too large: %d bytes",
+                        len(resp.content)
+                    )
+                    web.ctx.status = "502 Bad Gateway"
+                    err_msg = {"error": "Response from backend too large"}
+                    log_trace(raw_body, resp.content, err_msg)
+                    return json.dumps(err_msg)
+
+                resp_data = None
+                try:
+                    # Basic validation of embeddings response
+                    resp_data = resp.json()
+                    if "data" not in resp_data:
+                        logging.warning(
+                            "Embeddings response missing 'data' field: %s",
+                            resp_data
+                        )
+                except Exception as e:
+                    logging.warning("Could not parse embeddings JSON: %s", e)
+
+                log_trace(raw_body, resp.content, resp_data or resp.content)
+                web.header('Content-Type', 'application/json')
                 return resp.content
 
-            # Response size limit for embeddings (50 MB)
-            if len(resp.content) > 50 * 1024 * 1024:
-                logging.error(
-                    "Embeddings response too large: %d bytes",
-                    len(resp.content)
-                )
-                web.ctx.status = "502 Bad Gateway"
-                err_msg = {"error": "Response from backend too large"}
-                log_trace(raw_body, resp.content, err_msg)
-                return json.dumps(err_msg)
-
-            resp_data = None
-            try:
-                # Basic validation of embeddings response
-                resp_data = resp.json()
-                if "data" not in resp_data:
-                    logging.warning(
-                        "Embeddings response missing 'data' field: %s",
-                        resp_data
-                    )
             except Exception as e:
-                logging.warning("Could not parse embeddings JSON: %s", e)
-
-            log_trace(raw_body, resp.content, resp_data or resp.content)
-            web.header('Content-Type', 'application/json')
-            return resp.content
-
-        except Exception as e:
-            logging.error(
-                f"Unexpected error in EmbeddingsProxy POST: {e}", exc_info=True
-            )
-            web.ctx.status = "500 Internal Server Error"
-            err_msg = {"error": str(e)}
-            log_trace(raw_body, None, err_msg)
-            return json.dumps(err_msg)
+                logging.error(
+                    f"Unexpected error in EmbeddingsProxy POST: {e}", exc_info=True
+                )
+                web.ctx.status = "500 Internal Server Error"
+                err_msg = {"error": str(e)}
+                log_trace(raw_body, None, err_msg)
+                return json.dumps(err_msg)
 
 
 class ListModels:

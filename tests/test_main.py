@@ -160,7 +160,7 @@ class TestModelProxy(unittest.TestCase):
         main.web._test_data = large_data
         proxy = main.ChatProxy()
         result = proxy.POST()
-        self.assertIn("Failed to activate model", result)
+        self.assertIn("Failed to parse request", result)
         self.assertEqual(main.web.ctx.status, "413 Payload Too Large")
 
     @patch('main.requests.get')
