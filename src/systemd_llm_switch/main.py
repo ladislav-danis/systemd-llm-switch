@@ -56,7 +56,7 @@ def load_config(path: str = 'config.yaml'):
         with open(config_path, 'r') as f:
             data = yaml.safe_load(f)
 
-        if not data or 'server' not in data or 'models' not in data:
+        if data is None or 'server' not in data or 'models' not in data:
             logging.critical(
                 "The configuration file is invalid "
                 "or the 'server'/'models' section is missing."
@@ -77,7 +77,6 @@ def load_config(path: str = 'config.yaml'):
             logging.critical("No models defined in configuration.")
             sys.exit(1)
 
-        server_cfg = data['server']
         LLAMA_URL = server_cfg.get('llama_url')
         if not LLAMA_URL:
             logging.critical("'llama_url' is missing in 'server' configuration.")
@@ -210,37 +209,34 @@ class BaseModelProxy:
 
         with BaseModelProxy._lock:
             # 1. If we already have the model registered as active,
-            # we do not take any action.
+            # we check if it's REALLY active in systemd.
             if BaseModelProxy._current_active_model == target_model:
-                return True
+                status_result = run_systemctl_user("is-active", target_service)
+                if status_result.stdout.strip() == "active":
+                    return True
 
-            # 2. Checking the actual status of the service in the system
-            status_result = run_systemctl_user("is-active", target_service)
-            if status_result.stdout.strip() == "active":
-                BaseModelProxy._current_active_model = target_model
-                return True
-
-            # 3. Switching logic
+            # 2. Switching logic - always performed under LOCK
             logging.info(f"--- Switching to model: {target_model} ---")
             previous_model = BaseModelProxy._current_active_model
 
-            # Stop all models (release VRAM)
-            for srv in MODELS.values():
-                # Only stop if it's active or activating to avoid race condition errors
-                check_active = run_systemctl_user("is-active", srv)
-                if check_active.stdout.strip() in ("active", "activating"):
-                    stop_res = run_systemctl_user("stop", srv)
-                    if stop_res.returncode != 0:
-                        logging.error(
-                            f"Failed to stop service {srv}: {stop_res.stderr}"
-                        )
+            # Stop all other models (release VRAM)
+            for model_id, srv in MODELS.items():
+                if model_id == target_model:
+                    continue
+                # We don't check is-active, just call stop. It's idempotent.
+                stop_res = run_systemctl_user("stop", srv)
+                if stop_res.returncode != 0:
+                    logging.error(
+                        f"Failed to stop service {srv}: {stop_res.stderr}"
+                    )
 
-            # Reset state after stopping everything
+            # Reset state
             BaseModelProxy._current_active_model = None
 
-            # Reset failed state for target service only if it was failed
+            # Reset failed state for target service
+            # is-failed returns 0 if service IS failed
             check_failed = run_systemctl_user("is-failed", target_service)
-            if check_failed.returncode == 0:  # 0 means it IS failed in some versions
+            if check_failed.returncode == 0:
                 run_systemctl_user("reset-failed", target_service)
 
             # Start selected model
@@ -254,7 +250,7 @@ class BaseModelProxy:
                 self._rollback(previous_model)
                 return False
 
-            # 4. Health check - waiting for API to start (max 120s)
+            # 3. Health check - waiting for API to start (max 120s)
             success = self._wait_for_ready(target_model, timeout=120)
 
             if not success:
@@ -275,7 +271,7 @@ class BaseModelProxy:
         Returns:
             True if ready, False otherwise.
         """
-        for _ in range(timeout):
+        for i in range(timeout):
             try:
                 # Check health endpoint
                 resp = requests.get(f"{LLAMA_URL}/health", timeout=1)
@@ -290,7 +286,7 @@ class BaseModelProxy:
             except requests.exceptions.RequestException:
                 pass
             time.sleep(1)
-            if _ % 5 == 0:
+            if i % 5 == 0:
                 logging.info(f"Waiting for {model_name} to be ready...")
         return False
 
@@ -301,6 +297,7 @@ class BaseModelProxy:
             previous_model: The model ID that was active before the failed switch.
         """
         if not previous_model or previous_model not in MODELS:
+            BaseModelProxy._current_active_model = None
             return
 
         logging.info(f"Rolling back to previous model: {previous_model}")
@@ -309,7 +306,7 @@ class BaseModelProxy:
         run_systemctl_user("start", prev_service)
 
         # Verify rollback with a shorter health check (max 30s)
-        if self._wait_for_ready(f"Rollback:{previous_model}", timeout=30):
+        if self._wait_for_ready(previous_model, timeout=30):
             logging.info(f"Rollback to {previous_model} successful.")
             BaseModelProxy._current_active_model = previous_model
         else:
@@ -337,9 +334,9 @@ class ChatProxy(BaseModelProxy):
            web.ctx.status: Set to "400 Bad Request" for invalid JSON,
                 "500 Internal Server Error" for activation failures.
         """
+        raw_body = web.data()
         try:
             # Reading JSON data from the request body
-            raw_body = web.data()
             if not raw_body:
                 web.ctx.status = "400 Bad Request"
                 return json.dumps({"error": "No data provided"})
@@ -498,13 +495,17 @@ class ChatProxy(BaseModelProxy):
 
         except json.JSONDecodeError:
             web.ctx.status = "400 Bad Request"
-            return json.dumps({"error": "Invalid JSON"})
+            err_msg = {"error": "Invalid JSON"}
+            log_trace(raw_body, None, err_msg)
+            return json.dumps(err_msg)
         except Exception as e:
             logging.error(
                 f"Unexpected error in POST handler: {e}", exc_info=True
                 )
             web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+            err_msg = {"error": str(e)}
+            log_trace(raw_body, None, err_msg)
+            return json.dumps(err_msg)
 
 
 class EmbeddingsProxy(BaseModelProxy):
@@ -516,8 +517,8 @@ class EmbeddingsProxy(BaseModelProxy):
         Switches to the requested model and forwards the request to the active
         llama.cpp backend.
         """
+        raw_body = web.data()
         try:
-            raw_body = web.data()
             if not raw_body:
                 web.ctx.status = "400 Bad Request"
                 return json.dumps({"error": "No data provided"})
@@ -554,6 +555,7 @@ class EmbeddingsProxy(BaseModelProxy):
                     resp.status_code, resp.text
                 )
                 web.ctx.status = f"{resp.status_code} Error"
+                log_trace(raw_body, resp.content, f"BACKEND ERROR: {resp.status_code}")
                 return resp.content
 
             # Response size limit for embeddings (50 MB)
@@ -563,7 +565,9 @@ class EmbeddingsProxy(BaseModelProxy):
                     len(resp.content)
                 )
                 web.ctx.status = "502 Bad Gateway"
-                return json.dumps({"error": "Response from backend too large"})
+                err_msg = {"error": "Response from backend too large"}
+                log_trace(raw_body, resp.content, err_msg)
+                return json.dumps(err_msg)
 
             resp_data = None
             try:
@@ -583,13 +587,17 @@ class EmbeddingsProxy(BaseModelProxy):
 
         except json.JSONDecodeError:
             web.ctx.status = "400 Bad Request"
-            return json.dumps({"error": "Invalid JSON"})
+            err_msg = {"error": "Invalid JSON"}
+            log_trace(raw_body, None, err_msg)
+            return json.dumps(err_msg)
         except Exception as e:
             logging.error(
                 f"Unexpected error in EmbeddingsProxy POST: {e}", exc_info=True
             )
             web.ctx.status = "500 Internal Server Error"
-            return json.dumps({"error": str(e)})
+            err_msg = {"error": str(e)}
+            log_trace(raw_body, None, err_msg)
+            return json.dumps(err_msg)
 
 
 class ListModels:
