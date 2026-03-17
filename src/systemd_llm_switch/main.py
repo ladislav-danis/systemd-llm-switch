@@ -169,6 +169,10 @@ class BaseModelProxy:
         Returns:
             True if model was successfully activated, False otherwise.
         """
+        if not target_model:
+            logging.error("No target model specified.")
+            return False
+
         target_service = MODELS.get(target_model)
         if not target_service:
             logging.error(
@@ -195,6 +199,9 @@ class BaseModelProxy:
             # Stop all models (release VRAM)
             for srv in MODELS.values():
                 run_systemctl_user("stop", srv)
+
+            # Reset state after stopping everything
+            BaseModelProxy._current_active_model = None
 
             # Start selected model
             logging.info(f"I am starting the service: {target_service}")
@@ -256,6 +263,10 @@ class ChatProxy(BaseModelProxy):
             data["stream"] = False
             target_model = data.get("model")
 
+            if not target_model:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "No model specified in the request"})
+
             logging.info(f"Model request accepted: {target_model}")
 
             # Attempt to switch models
@@ -292,11 +303,11 @@ class ChatProxy(BaseModelProxy):
                     # 2. Repair tool_calls arguments if present
                     for tool in tool_calls:
                         func = tool.get("function", {})
-                        args = func.get("arguments", "")
+                        args = func.get("arguments")
                         if args:
                             try:
                                 json.loads(args)
-                            except json.JSONDecodeError:
+                            except (json.JSONDecodeError, TypeError):
                                 tool_name = func.get("name", "unknown")
                                 logging.info(
                                     "Repairing JSON in tool '%s' args",
@@ -354,6 +365,22 @@ class ChatProxy(BaseModelProxy):
                     f"ERROR: {e}\nORIGINAL CONTENT: "
                     f"{raw_resp_content.decode('utf-8', errors='replace')}",
                 )
+
+                if client_wants_stream:
+                    web.header('Content-Type', 'text/event-stream')
+                    def stream_error(content):
+                        err_msg = {
+                            "error": {
+                                "message": "Failed to parse backend response",
+                                "details": content.decode(
+                                    'utf-8', errors='replace'
+                                )
+                            }
+                        }
+                        yield f"data: {json.dumps(err_msg)}\n\n".encode('utf-8')
+                        yield b"data: [DONE]\n\n"
+                    return stream_error(raw_resp_content)
+
                 return resp.content
 
         except json.JSONDecodeError:
@@ -384,6 +411,10 @@ class EmbeddingsProxy(BaseModelProxy):
 
             data = json.loads(raw_body)
             target_model = data.get("model")
+
+            if not target_model:
+                web.ctx.status = "400 Bad Request"
+                return json.dumps({"error": "No model specified in the request"})
 
             logging.info(f"Embeddings request accepted: {target_model}")
 

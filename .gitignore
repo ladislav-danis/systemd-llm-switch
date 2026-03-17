@@ -24,3 +24,4 @@ llm_trace.log
 .coverage
 htmlcov/
 src/llm_trace.log
+tests/ask.png

@@ -177,6 +177,16 @@ class TestModelProxy(unittest.TestCase):
         self.assertIn("Failed to activate model", result)
         self.assertEqual(main.web.ctx.status, "500 Internal Server Error")
 
+    def test_missing_model_error(self):
+        """Testing the handling of requests with missing model field."""
+        main.web._test_data = json.dumps({"messages": [{"role": "user", "content": "Hi"}]})
+
+        proxy = main.ChatProxy()
+        result = proxy.POST()
+
+        self.assertIn("No model specified in the request", result)
+        self.assertEqual(main.web.ctx.status, "400 Bad Request")
+
     @patch('main.subprocess.run')
     @patch('main.requests.post')
     @patch('main.requests.get')
@@ -261,6 +271,40 @@ class TestModelProxy(unittest.TestCase):
             parsed_result["choices"][0]["message"]["content"],
             malformed_json_text
         )
+
+    @patch('main.subprocess.run')
+    @patch('main.requests.post')
+    @patch('main.requests.get')
+    def test_streaming_backend_error(self, mock_get, mock_post, mock_run):
+        """Test that streaming handles backend JSON parse errors gracefully."""
+        main.web._test_data = json.dumps({
+            "model": "qwen3-coder-flash",
+            "stream": True,
+            "messages": []
+        })
+        mock_run.return_value = MagicMock(stdout="active")
+        mock_get.return_value = MagicMock(status_code=200)
+
+        # Simulate backend returning non-JSON content
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b"Not a JSON response"
+        mock_response.json.side_effect = ValueError("No JSON object could be decoded")
+        mock_post.return_value = mock_response
+
+        proxy = main.ChatProxy()
+        result = proxy.POST()
+
+        import types
+        self.assertIsInstance(result, types.GeneratorType)
+
+        chunks = list(result)
+        self.assertTrue(chunks[0].startswith(b'data: {'))
+        error_data = json.loads(chunks[0][6:])
+        self.assertIn("error", error_data)
+        self.assertEqual(error_data["error"]["message"], "Failed to parse backend response")
+        self.assertEqual(error_data["error"]["details"], "Not a JSON response")
+        self.assertEqual(chunks[1], b'data: [DONE]\n\n')
 
     def test_list_models_endpoint(self):
         """Test that the endpoint /v1/models returns all defined models."""
