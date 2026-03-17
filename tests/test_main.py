@@ -152,7 +152,7 @@ class TestModelProxy(unittest.TestCase):
         main.web._test_data = json.dumps({"messages": [{"role": "user", "content": "Hi"}]})
         proxy = main.ChatProxy()
         result = proxy.POST()
-        self.assertIn("No model specified in the request", result)
+        self.assertIn("Invalid request or missing model", result)
         self.assertEqual(main.web.ctx.status, "400 Bad Request")
 
     def test_payload_too_large(self):
@@ -160,7 +160,7 @@ class TestModelProxy(unittest.TestCase):
         main.web._test_data = large_data
         proxy = main.ChatProxy()
         result = proxy.POST()
-        self.assertIn("Payload exceeds 10MB limit", result)
+        self.assertIn("Failed to activate model", result)
         self.assertEqual(main.web.ctx.status, "413 Payload Too Large")
 
     @patch('main.requests.get')

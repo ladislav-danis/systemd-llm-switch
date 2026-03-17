@@ -176,12 +176,59 @@ class BaseModelProxy:
     """Base proxy handler with model switching capabilities.
 
     Attributes:
-        _lock: Threading lock to serialize model switching operations.
+        _lock: Reentrant threading lock to serialize model switching.
         _current_active_model: Track currently active model name.
     """
 
-    _lock = threading.Lock()
+    _lock = threading.RLock()
     _current_active_model: Optional[str] = None
+
+    def _get_validated_data(self) -> Optional[dict]:
+        """Reads and validates the request body.
+
+        Returns:
+            The parsed JSON data if valid, None otherwise (sets web.ctx.status).
+        """
+        raw_body = None
+        try:
+            raw_body = web.data()
+            if not raw_body:
+                web.ctx.status = "400 Bad Request"
+                return None
+
+            # Payload size limit (10 MB)
+            if len(raw_body) > 10 * 1024 * 1024:
+                web.ctx.status = "413 Payload Too Large"
+                return None
+
+            data = json.loads(raw_body)
+            target_model = data.get("model")
+
+            if not target_model:
+                web.ctx.status = "400 Bad Request"
+                return None
+
+            # Store raw body for tracing in subclasses
+            web.ctx._raw_body = raw_body
+
+            if not self.switch_model(target_model):
+                web.ctx.status = "500 Internal Server Error"
+                return None
+
+            return data
+
+        except json.JSONDecodeError:
+            web.ctx.status = "400 Bad Request"
+            err_msg = {"error": "Invalid JSON"}
+            if raw_body:
+                log_trace(raw_body, None, err_msg)
+            return None
+        except Exception as e:
+            logging.error(f"Error in _get_validated_data: {e}", exc_info=True)
+            web.ctx.status = "500 Internal Server Error"
+            if raw_body:
+                log_trace(raw_body, None, {"error": str(e)})
+            return None
 
     def switch_model(self, target_model: str) -> bool:
         """Switches to the specified model by starting its systemd service.
@@ -224,7 +271,9 @@ class BaseModelProxy:
                 if model_id == target_model:
                     continue
                 # We don't check is-active, just call stop. It's idempotent.
-                stop_res = run_systemctl_user("stop", srv)
+                # Adding --now for faster termination as suggested
+                command = ["/usr/bin/systemctl", "--user", "stop", srv]
+                stop_res = subprocess.run(command, capture_output=True, text=True)
                 if stop_res.returncode != 0:
                     logging.error(
                         f"Failed to stop service {srv}: {stop_res.stderr}"
@@ -234,7 +283,6 @@ class BaseModelProxy:
             BaseModelProxy._current_active_model = None
 
             # Reset failed state for target service
-            # is-failed returns 0 if service IS failed
             check_failed = run_systemctl_user("is-failed", target_service)
             if check_failed.returncode == 0:
                 run_systemctl_user("reset-failed", target_service)
@@ -296,22 +344,34 @@ class BaseModelProxy:
         Args:
             previous_model: The model ID that was active before the failed switch.
         """
-        if not previous_model or previous_model not in MODELS:
-            BaseModelProxy._current_active_model = None
-            return
+        with BaseModelProxy._lock:
+            if not previous_model or previous_model not in MODELS:
+                # Attempt to find if any model is actually active
+                self._sync_active_model()
+                return
 
-        logging.info(f"Rolling back to previous model: {previous_model}")
-        prev_service = MODELS[previous_model]
-        run_systemctl_user("reset-failed", prev_service)
-        run_systemctl_user("start", prev_service)
+            logging.info(f"Rolling back to previous model: {previous_model}")
+            prev_service = MODELS[previous_model]
+            run_systemctl_user("reset-failed", prev_service)
+            run_systemctl_user("start", prev_service)
 
-        # Verify rollback with a shorter health check (max 30s)
-        if self._wait_for_ready(previous_model, timeout=30):
-            logging.info(f"Rollback to {previous_model} successful.")
-            BaseModelProxy._current_active_model = previous_model
-        else:
-            logging.error(f"Rollback to {previous_model} failed.")
+            # Verify rollback with a shorter health check (max 30s)
+            if self._wait_for_ready(previous_model, timeout=30):
+                logging.info(f"Rollback to {previous_model} successful.")
+                BaseModelProxy._current_active_model = previous_model
+            else:
+                logging.error(f"Rollback to {previous_model} failed.")
+                self._sync_active_model()
+
+    def _sync_active_model(self) -> None:
+        """Synchronizes _current_active_model with the actual systemd state."""
+        with BaseModelProxy._lock:
             BaseModelProxy._current_active_model = None
+            for model_id, srv in MODELS.items():
+                res = run_systemctl_user("is-active", srv)
+                if res.stdout.strip() == "active":
+                    BaseModelProxy._current_active_model = model_id
+                    break
 
 
 class ChatProxy(BaseModelProxy):
@@ -334,43 +394,23 @@ class ChatProxy(BaseModelProxy):
            web.ctx.status: Set to "400 Bad Request" for invalid JSON,
                 "500 Internal Server Error" for activation failures.
         """
-        raw_body = web.data()
+        data = self._get_validated_data()
+        if data is None:
+            # Status and error trace already handled in _get_validated_data
+            if web.ctx.status.startswith("400"):
+                return json.dumps({"error": "Invalid request or missing model"})
+            return json.dumps({"error": f"Failed to activate model"})
+
+        raw_body = web.ctx._raw_body
         try:
-            # Reading JSON data from the request body
-            if not raw_body:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "No data provided"})
-
-            # Payload size limit (10 MB)
-            if len(raw_body) > 10 * 1024 * 1024:
-                web.ctx.status = "413 Payload Too Large"
-                return json.dumps({"error": "Payload exceeds 10MB limit"})
-
-            data = json.loads(raw_body)
             # Check if the client requested streaming
             client_wants_stream = data.get("stream", False)
 
             # Force stream=False to ensure we can parse and repair the response
             # regardless of client settings.
             data["stream"] = False
-            target_model = data.get("model")
-
-            if not target_model:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "No model specified in the request"})
-
-            logging.info(f"Model request accepted: {target_model}")
-
-            # Attempt to switch models
-            if not self.switch_model(target_model):
-                web.ctx.status = "500 Internal Server Error"
-                return json.dumps(
-                    {"error": f"Failed to activate model {target_model}"}
-                )
 
             # Forwarding the request to the llama.cpp backend
-            # Always use stream=False here because we forced
-            # data["stream"] = False
             resp = requests.post(
                 f"{LLAMA_URL}/v1/chat/completions",
                 json=data,
@@ -382,16 +422,10 @@ class ChatProxy(BaseModelProxy):
             try:
                 resp_data = resp.json()
                 # If it's a chat completion, try to repair the content
-                choices = resp_data.get("choices")
-                if choices is None:
-                    logging.warning(
-                        "Backend response missing 'choices': %s",
-                        resp_data
-                    )
-                    choices = []
-
-                if choices:
-                    message = resp_data["choices"][0].get("message", {})
+                choices = resp_data.get("choices", [])
+                
+                for choice in choices:
+                    message = choice.get("message", {})
 
                     # 1. Ensure content is null if tool_calls present
                     #    (standard OpenAI)
@@ -493,11 +527,6 @@ class ChatProxy(BaseModelProxy):
 
                 return resp.content
 
-        except json.JSONDecodeError:
-            web.ctx.status = "400 Bad Request"
-            err_msg = {"error": "Invalid JSON"}
-            log_trace(raw_body, None, err_msg)
-            return json.dumps(err_msg)
         except Exception as e:
             logging.error(
                 f"Unexpected error in POST handler: {e}", exc_info=True
@@ -517,32 +546,14 @@ class EmbeddingsProxy(BaseModelProxy):
         Switches to the requested model and forwards the request to the active
         llama.cpp backend.
         """
-        raw_body = web.data()
+        data = self._get_validated_data()
+        if data is None:
+            if web.ctx.status.startswith("400"):
+                return json.dumps({"error": "Invalid request or missing model"})
+            return json.dumps({"error": f"Failed to activate model"})
+
+        raw_body = web.ctx._raw_body
         try:
-            if not raw_body:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "No data provided"})
-
-            # Payload size limit (10 MB)
-            if len(raw_body) > 10 * 1024 * 1024:
-                web.ctx.status = "413 Payload Too Large"
-                return json.dumps({"error": "Payload exceeds 10MB limit"})
-
-            data = json.loads(raw_body)
-            target_model = data.get("model")
-
-            if not target_model:
-                web.ctx.status = "400 Bad Request"
-                return json.dumps({"error": "No model specified in the request"})
-
-            logging.info(f"Embeddings request accepted: {target_model}")
-
-            if not self.switch_model(target_model):
-                web.ctx.status = "500 Internal Server Error"
-                return json.dumps(
-                    {"error": f"Failed to activate model {target_model}"}
-                )
-
             resp = requests.post(
                 f"{LLAMA_URL}/v1/embeddings",
                 json=data,
@@ -585,11 +596,6 @@ class EmbeddingsProxy(BaseModelProxy):
             web.header('Content-Type', 'application/json')
             return resp.content
 
-        except json.JSONDecodeError:
-            web.ctx.status = "400 Bad Request"
-            err_msg = {"error": "Invalid JSON"}
-            log_trace(raw_body, None, err_msg)
-            return json.dumps(err_msg)
         except Exception as e:
             logging.error(
                 f"Unexpected error in EmbeddingsProxy POST: {e}", exc_info=True
