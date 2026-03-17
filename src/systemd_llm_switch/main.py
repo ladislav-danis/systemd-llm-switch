@@ -203,47 +203,44 @@ class BaseModelProxy:
     _lock = threading.RLock()
     _current_active_model: Optional[str] = None
 
-    def _get_validated_data(self) -> Optional[dict]:
+    def _get_validated_data(self) -> tuple[Optional[dict], bytes]:
         """Reads and validates the request body.
 
         Returns:
-            The parsed JSON data if valid, None otherwise (sets web.ctx.status).
+            A tuple of (parsed JSON data or None, raw bytes body).
         """
-        # Ensure _raw_body is initialized
-        web.ctx._raw_body = None
-        raw_body = None
+        raw_body = b""
         try:
             raw_body = web.data()
-            web.ctx._raw_body = raw_body
             
             if not raw_body:
                 web.ctx.status = "400 Bad Request"
-                return None
+                return None, raw_body
 
             # Payload size limit (10 MB)
             if len(raw_body) > 10 * 1024 * 1024:
                 web.ctx.status = "413 Payload Too Large"
-                return None
+                return None, raw_body
 
             data = json.loads(raw_body)
             target_model = data.get("model")
 
             if not target_model:
                 web.ctx.status = "400 Bad Request"
-                return None
+                return None, raw_body
 
-            return data
+            return data, raw_body
 
         except json.JSONDecodeError:
             web.ctx.status = "400 Bad Request"
             err_msg = {"error": "Invalid JSON"}
             log_trace(raw_body, None, err_msg)
-            return None
+            return None, raw_body
         except Exception as e:
             logging.error(f"Error in _get_validated_data: {e}", exc_info=True)
             web.ctx.status = "500 Internal Server Error"
             log_trace(raw_body, None, {"error": str(e)})
-            return None
+            return None, raw_body
 
     def switch_model(self, target_model: str) -> bool:
         """Switches to the specified model by starting its systemd service.
@@ -285,21 +282,16 @@ class BaseModelProxy:
             for model_id, srv in MODELS.items():
                 if model_id == target_model:
                     continue
-                # We don't check is-active, just call stop. It's idempotent.
-                # Adding --now for faster termination
+                
                 stop_res = run_systemctl_user("stop", srv, now=True)
                 if stop_res.returncode != 0:
-                    logging.error(
-                        f"Failed to stop service {srv}: {stop_res.stderr}"
-                    )
+                    logging.error(f"Failed to stop service {srv}: {stop_res.stderr}")
 
-            # Reset state
+            # Even if stop failed, we continue but mark state as unknown for now
             BaseModelProxy._current_active_model = None
 
             # Reset failed state for target service
-            check_failed = run_systemctl_user("is-failed", target_service)
-            if check_failed.returncode == 0:
-                run_systemctl_user("reset-failed", target_service)
+            run_systemctl_user("reset-failed", target_service)
 
             # Start selected model
             logging.info(f"I am starting the service: {target_service}")
@@ -358,6 +350,8 @@ class BaseModelProxy:
         Args:
             previous_model: The model ID that was active before the failed switch.
         """
+        # We assume we are already under lock if called from switch_model,
+        # but re-entering RLock is safe.
         with BaseModelProxy._lock:
             if not previous_model or previous_model not in MODELS:
                 # Attempt to find if any model is actually active
@@ -375,6 +369,7 @@ class BaseModelProxy:
                 BaseModelProxy._current_active_model = previous_model
             else:
                 logging.error(f"Rollback to {previous_model} failed.")
+                # We failed even to rollback, sync with reality
                 self._sync_active_model()
 
     def _sync_active_model(self) -> None:
@@ -408,14 +403,16 @@ class ChatProxy(BaseModelProxy):
            web.ctx.status: Set to "400 Bad Request" for invalid JSON,
                 "500 Internal Server Error" for activation failures.
         """
-        data = self._get_validated_data()
+        client_wants_stream = False
+        data, raw_body = self._get_validated_data()
+        
         if data is None:
             if web.ctx.status.startswith("400"):
                 return json.dumps({"error": "Invalid request or missing model"})
             return json.dumps({"error": "Failed to parse request"})
 
-        raw_body = web.ctx._raw_body
         target_model = data.get("model")
+        client_wants_stream = data.get("stream", False)
 
         # Entire request-response cycle is locked to prevent race conditions
         with BaseModelProxy._lock:
@@ -425,14 +422,14 @@ class ChatProxy(BaseModelProxy):
                     web.ctx.status = "500 Internal Server Error"
                     return json.dumps({"error": f"Failed to activate model {target_model}"})
 
-                # 2. Prepare the request
-                client_wants_stream = data.get("stream", False)
-                data["stream"] = False
+                # 2. Prepare the request (ensure non-streaming backend call)
+                backend_data = data.copy()
+                backend_data["stream"] = False
 
                 # 3. Forwarding the request to the llama.cpp backend
                 resp = requests.post(
                     f"{LLAMA_URL}/v1/chat/completions",
-                    json=data,
+                    json=backend_data,
                     stream=False,
                     timeout=(10, 1800)
                 )
@@ -457,25 +454,14 @@ class ChatProxy(BaseModelProxy):
                             func = tool.get("function", {})
                             args = func.get("arguments")
                             if args:
-                                try:
-                                    json.loads(args)
-                                except (json.JSONDecodeError, TypeError):
-                                    tool_name = func.get("name", "unknown")
+                                # repair_json handles valid JSON and repairs invalid ones
+                                repaired_args = repair_json(args)
+                                if repaired_args != args:
                                     logging.info(
-                                        "Repairing JSON in tool '%s' args",
-                                        tool_name
+                                        "Repaired JSON in tool '%s' args",
+                                        func.get("name", "unknown")
                                     )
-                                    repaired_args = repair_json(args)
-                                    try:
-                                        # Verify if the repair actually produced
-                                        # valid JSON
-                                        json.loads(repaired_args)
-                                        func["arguments"] = repaired_args
-                                    except json.JSONDecodeError:
-                                        logging.warning(
-                                            "Repair failed for tool '%s'",
-                                            tool_name
-                                        )
+                                    func["arguments"] = repaired_args
 
                     log_trace(raw_body, raw_resp_content, resp_data)
 
@@ -520,30 +506,28 @@ class ChatProxy(BaseModelProxy):
                         "Could not parse or repair backend response: %s", e
                     )
                     error_detail = f"ERROR: {e}"
+
+                    content_text = ""
                     if raw_resp_content is not None:
-                        error_detail += (
-                            "\nORIGINAL CONTENT: "
-                            + raw_resp_content.decode('utf-8', errors='replace')
-                        )
+                        content_text = raw_resp_content.decode('utf-8', errors='replace')
+                        error_detail += "\nORIGINAL CONTENT: " + content_text
+
                     log_trace(raw_body, raw_resp_content, error_detail)
 
                     if client_wants_stream:
                         web.header('Content-Type', 'text/event-stream')
-                        def stream_error(content):
+                        def stream_error(content_str):
                             err_msg = {
                                 "error": {
                                     "message": "Failed to parse backend response",
-                                    "details": content.decode(
-                                        'utf-8', errors='replace'
-                                    )
+                                    "details": content_str
                                 }
                             }
                             yield f"data: {json.dumps(err_msg)}\n\n".encode('utf-8')
                             yield b"data: [DONE]\n\n"
-                        return stream_error(raw_resp_content)
+                        return stream_error(content_text)
 
-                    return resp.content
-
+                    return raw_resp_content or json.dumps({"error": error_detail})
             except Exception as e:
                 logging.error(
                     f"Unexpected error in POST handler: {e}", exc_info=True
@@ -551,7 +535,16 @@ class ChatProxy(BaseModelProxy):
                 web.ctx.status = "500 Internal Server Error"
                 err_msg = {"error": str(e)}
                 log_trace(raw_body, None, err_msg)
+                
+                if client_wants_stream:
+                    web.header('Content-Type', 'text/event-stream')
+                    def stream_exception(msg):
+                        yield f"data: {json.dumps({'error': msg})}\n\n".encode('utf-8')
+                        yield b"data: [DONE]\n\n"
+                    return stream_exception(str(e))
+                
                 return json.dumps(err_msg)
+
 
 
 class EmbeddingsProxy(BaseModelProxy):
@@ -563,13 +556,12 @@ class EmbeddingsProxy(BaseModelProxy):
         Switches to the requested model and forwards the request to the active
         llama.cpp backend.
         """
-        data = self._get_validated_data()
+        data, raw_body = self._get_validated_data()
         if data is None:
             if web.ctx.status.startswith("400"):
                 return json.dumps({"error": "Invalid request or missing model"})
             return json.dumps({"error": "Failed to parse request"})
 
-        raw_body = web.ctx._raw_body
         target_model = data.get("model")
 
         # Entire request-response cycle is locked to prevent race conditions
