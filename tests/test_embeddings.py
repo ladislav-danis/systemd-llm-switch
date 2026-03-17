@@ -41,7 +41,7 @@ class TestEmbeddingsProxy(unittest.TestCase):
     @patch('main.requests.get')
     def test_embeddings_switch_and_post(self, mock_get, mock_post, mock_run):
         """Test switching to an embeddings model and getting a response."""
-        mock_run.return_value = MagicMock(stdout="inactive")
+        mock_run.return_value = MagicMock(stdout="inactive", returncode=0)
         mock_get.return_value = MagicMock(status_code=200)
 
         main.web._test_data = json.dumps({
@@ -66,8 +66,12 @@ class TestEmbeddingsProxy(unittest.TestCase):
         proxy = main.EmbeddingsProxy()
         result = proxy.POST()
 
-        self.assertIn(b"embedding", result)
-        self.assertIn(b"0.1, 0.2, 0.3", result)
+        if isinstance(result, bytes):
+            self.assertIn(b"embedding", result)
+            self.assertIn(b"0.1, 0.2, 0.3", result)
+        else:
+            self.assertIn("embedding", result)
+            self.assertIn("0.1, 0.2, 0.3", result)
 
         # Verify model switching
         calls = [str(c) for c in mock_run.call_args_list]

@@ -61,7 +61,7 @@ class TestModelProxy(unittest.TestCase):
     @patch('main.requests.get')
     def test_switch_to_coder_and_chat(self, mock_get, mock_post, mock_run):
         """Test switching to the Coder model and obtaining a JSON response."""
-        mock_run.return_value = MagicMock(stdout="inactive")
+        mock_run.return_value = MagicMock(stdout="inactive", returncode=0)
         mock_get.return_value = MagicMock(status_code=200)
 
         mock_response = MagicMock()
@@ -103,7 +103,7 @@ class TestModelProxy(unittest.TestCase):
             "stream": False,
             "messages": []
         })
-        mock_run.return_value = MagicMock(stdout="inactive")
+        mock_run.return_value = MagicMock(stdout="inactive", returncode=0)
         mock_get.return_value = MagicMock(status_code=200)
 
         mock_response = MagicMock()

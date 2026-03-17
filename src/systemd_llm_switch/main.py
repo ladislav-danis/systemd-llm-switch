@@ -49,6 +49,10 @@ def load_config(path: str = 'config.yaml'):
     global CONFIG, MODELS, LLAMA_URL, TRACE_LOG_PATH
     try:
         config_path = Path(__file__).parent / path
+        if not config_path.exists():
+            logging.critical(f"Configuration file not found at: {config_path}")
+            sys.exit(1)
+
         with open(config_path, 'r') as f:
             data = yaml.safe_load(f)
 
@@ -61,8 +65,17 @@ def load_config(path: str = 'config.yaml'):
 
         CONFIG = data
         MODELS = data['models']
-        LLAMA_URL = data['server']['llama_url']
-        TRACE_LOG_PATH = data['server'].get('trace_log')
+        if not MODELS:
+            logging.critical("No models defined in configuration.")
+            sys.exit(1)
+
+        server_cfg = data['server']
+        LLAMA_URL = server_cfg.get('llama_url')
+        if not LLAMA_URL:
+            logging.critical("'llama_url' is missing in 'server' configuration.")
+            sys.exit(1)
+
+        TRACE_LOG_PATH = server_cfg.get('trace_log')
         if TRACE_LOG_PATH:
             TRACE_LOG_PATH = Path(__file__).parent / TRACE_LOG_PATH
 
@@ -205,16 +218,29 @@ class BaseModelProxy:
 
             # Start selected model
             logging.info(f"I am starting the service: {target_service}")
-            run_systemctl_user("start", target_service)
+            start_result = run_systemctl_user("start", target_service)
+            if start_result.returncode != 0:
+                logging.error(
+                    f"Failed to start service {target_service}: "
+                    f"{start_result.stderr}"
+                )
+                return False
 
             # 4. Health check - waiting for API to start (max 120s)
             for _ in range(120):
                 try:
+                    # Check health endpoint
                     resp = requests.get(f"{LLAMA_URL}/health", timeout=1)
                     if resp.status_code == 200:
-                        logging.info(f"The {target_model} model is ready.")
-                        BaseModelProxy._current_active_model = target_model
-                        return True
+                        # Double check with models endpoint to ensure full readiness
+                        models_resp = requests.get(
+                            f"{LLAMA_URL}/v1/models",
+                            timeout=1
+                        )
+                        if models_resp.status_code == 200:
+                            logging.info(f"The {target_model} model is ready.")
+                            BaseModelProxy._current_active_model = target_model
+                            return True
                 except requests.exceptions.RequestException:
                     pass
                 time.sleep(1)
@@ -313,7 +339,17 @@ class ChatProxy(BaseModelProxy):
                                     "Repairing JSON in tool '%s' args",
                                     tool_name
                                 )
-                                func["arguments"] = repair_json(args)
+                                repaired_args = repair_json(args)
+                                try:
+                                    # Verify if the repair actually produced
+                                    # valid JSON
+                                    json.loads(repaired_args)
+                                    func["arguments"] = repaired_args
+                                except json.JSONDecodeError:
+                                    logging.warning(
+                                        "Repair failed for tool '%s'",
+                                        tool_name
+                                    )
 
                 log_trace(raw_body, raw_resp_content, resp_data)
 

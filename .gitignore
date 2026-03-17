@@ -25,3 +25,4 @@ llm_trace.log
 htmlcov/
 src/llm_trace.log
 tests/ask.png
+tests/ask.md
