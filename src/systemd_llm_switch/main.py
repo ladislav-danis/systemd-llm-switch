@@ -149,18 +149,23 @@ def log_trace(
 # Auxiliary function for calling systemctl --user
 def run_systemctl_user(
     action: str,
-    service: str
+    service: str,
+    now: bool = False
 ) -> subprocess.CompletedProcess:
     """Executes a systemctl --user command for the specified service.
 
     Args:
         action: The action to perform (e.g., 'start', 'stop', 'is-active').
         service: The service name to operate on.
+        now: If True, adds --now flag (for stop/start).
 
     Returns:
         A CompletedProcess object containing the command execution results.
     """
-    command = ["/usr/bin/systemctl", "--user", action, service]
+    command = ["/usr/bin/systemctl", "--user", action]
+    if now and action in ("start", "stop", "restart"):
+        command.append("--now")
+    command.append(service)
     return subprocess.run(command, capture_output=True, text=True)
 
 
@@ -189,9 +194,13 @@ class BaseModelProxy:
         Returns:
             The parsed JSON data if valid, None otherwise (sets web.ctx.status).
         """
+        # Ensure _raw_body is initialized to avoid AttributeError later
+        web.ctx._raw_body = None
         raw_body = None
         try:
             raw_body = web.data()
+            web.ctx._raw_body = raw_body
+            
             if not raw_body:
                 web.ctx.status = "400 Bad Request"
                 return None
@@ -208,9 +217,6 @@ class BaseModelProxy:
                 web.ctx.status = "400 Bad Request"
                 return None
 
-            # Store raw body for tracing in subclasses
-            web.ctx._raw_body = raw_body
-
             if not self.switch_model(target_model):
                 web.ctx.status = "500 Internal Server Error"
                 return None
@@ -220,14 +226,12 @@ class BaseModelProxy:
         except json.JSONDecodeError:
             web.ctx.status = "400 Bad Request"
             err_msg = {"error": "Invalid JSON"}
-            if raw_body:
-                log_trace(raw_body, None, err_msg)
+            log_trace(raw_body, None, err_msg)
             return None
         except Exception as e:
             logging.error(f"Error in _get_validated_data: {e}", exc_info=True)
             web.ctx.status = "500 Internal Server Error"
-            if raw_body:
-                log_trace(raw_body, None, {"error": str(e)})
+            log_trace(raw_body, None, {"error": str(e)})
             return None
 
     def switch_model(self, target_model: str) -> bool:
@@ -271,9 +275,8 @@ class BaseModelProxy:
                 if model_id == target_model:
                     continue
                 # We don't check is-active, just call stop. It's idempotent.
-                # Adding --now for faster termination as suggested
-                command = ["/usr/bin/systemctl", "--user", "stop", srv]
-                stop_res = subprocess.run(command, capture_output=True, text=True)
+                # Adding --now for faster termination
+                stop_res = run_systemctl_user("stop", srv, now=True)
                 if stop_res.returncode != 0:
                     logging.error(
                         f"Failed to stop service {srv}: {stop_res.stderr}"
@@ -472,11 +475,9 @@ class ChatProxy(BaseModelProxy):
                         chunk_data = repaired_data.copy()
                         chunk_data["object"] = "chat.completion.chunk"
 
-                        if (
-                            "choices" in chunk_data
-                            and len(chunk_data["choices"]) > 0
-                        ):
-                            choice = chunk_data["choices"][0]
+                        choices = chunk_data.get("choices", [])
+                        if choices:
+                            choice = choices[0]
                             if "message" in choice:
                                 choice["delta"] = choice.pop("message")
                                 # OpenAI stream format for tool_calls
