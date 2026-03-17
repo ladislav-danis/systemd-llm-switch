@@ -187,6 +187,54 @@ class TestModelProxy(unittest.TestCase):
         self.assertIn("No model specified in the request", result)
         self.assertEqual(main.web.ctx.status, "400 Bad Request")
 
+    def test_payload_too_large(self):
+        """Test that payload > 10MB is rejected."""
+        # 11MB of data
+        large_data = "a" * (11 * 1024 * 1024)
+        main.web._test_data = large_data
+
+        proxy = main.ChatProxy()
+        result = proxy.POST()
+
+        self.assertIn("Payload exceeds 10MB limit", result)
+        self.assertEqual(main.web.ctx.status, "413 Payload Too Large")
+
+    @patch('main.subprocess.run')
+    def test_rollback_on_failure(self, mock_run):
+        """Test that rollback to previous model occurs on failure."""
+        # Setup: first model is active
+        main.BaseModelProxy._current_active_model = "qwen3-coder-flash"
+
+        # Request switching to a new model
+        main.web._test_data = json.dumps({
+            "model": "qwen3-thinking",
+            "messages": []
+        })
+
+        # Mock start failure
+        def side_effect(command, **kwargs):
+            if "start" in command and "qwen3-thinking.service" in command:
+                return MagicMock(returncode=1, stderr="Failed to start")
+            return MagicMock(returncode=0, stdout="inactive")
+
+        mock_run.side_effect = side_effect
+
+        proxy = main.ChatProxy()
+        result = proxy.POST()
+
+        self.assertIn("Failed to activate model", result)
+
+        # Check that rollback was attempted (started the flash model again)
+        calls = [str(c) for c in mock_run.call_args_list]
+        self.assertTrue(any(
+            "start" in c and "qwen3-coder-flash.service" in c
+            for c in calls
+        ))
+        self.assertEqual(
+            main.BaseModelProxy._current_active_model,
+            "qwen3-coder-flash"
+        )
+
     @patch('main.subprocess.run')
     @patch('main.requests.post')
     @patch('main.requests.get')

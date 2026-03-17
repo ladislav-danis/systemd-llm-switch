@@ -63,6 +63,14 @@ def load_config(path: str = 'config.yaml'):
             )
             sys.exit(1)
 
+        server_cfg = data['server']
+        if 'host' not in server_cfg or 'port' not in server_cfg:
+            logging.critical(
+                "The 'server' section in config.yaml must contain "
+                "'host' and 'port' keys."
+            )
+            sys.exit(1)
+
         CONFIG = data
         MODELS = data['models']
         if not MODELS:
@@ -105,29 +113,33 @@ def log_trace(
     if not TRACE_LOG_PATH:
         return
 
+    # Maximum size for full logging (1 MB)
+    MAX_LOG_SIZE = 1024 * 1024
+
+    def format_data(data):
+        if isinstance(data, (dict, list)):
+            text = json.dumps(data, indent=2, ensure_ascii=False)
+        elif isinstance(data, bytes):
+            if len(data) > MAX_LOG_SIZE:
+                return f"<BINARY DATA: {len(data)} bytes, TOO LARGE TO LOG>"
+            text = data.decode('utf-8', errors='replace')
+        else:
+            text = str(data)
+
+        if len(text) > MAX_LOG_SIZE:
+            return f"<DATA: {len(text)} characters, TOO LARGE TO LOG>"
+        return text
+
     try:
         with open(TRACE_LOG_PATH, 'a', encoding='utf-8') as f:
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
             f.write(f"--- TRACE {timestamp} ---\n")
             f.write("=== INPUT ===\n")
-            if isinstance(input_raw, bytes):
-                f.write(input_raw.decode('utf-8', errors='replace'))
-            else:
-                f.write(str(input_raw))
-
+            f.write(format_data(input_raw))
             f.write("\n\n=== RAW OUTPUT ===\n")
-            if isinstance(raw_output, bytes):
-                f.write(raw_output.decode('utf-8', errors='replace'))
-            else:
-                f.write(str(raw_output))
-
+            f.write(format_data(raw_output))
             f.write("\n\n=== FINAL OUTPUT ===\n")
-            if isinstance(final_output, (dict, list)):
-                f.write(json.dumps(final_output, indent=2, ensure_ascii=False))
-            elif isinstance(final_output, bytes):
-                f.write(final_output.decode('utf-8', errors='replace'))
-            else:
-                f.write(str(final_output))
+            f.write(format_data(final_output))
             f.write("\n" + "="*40 + "\n\n")
     except Exception as e:
         logging.error(f"Error writing to trace log: {e}")
@@ -208,13 +220,21 @@ class BaseModelProxy:
 
             # 3. Switching logic
             logging.info(f"--- Switching to model: {target_model} ---")
+            previous_model = BaseModelProxy._current_active_model
 
             # Stop all models (release VRAM)
             for srv in MODELS.values():
-                run_systemctl_user("stop", srv)
+                stop_res = run_systemctl_user("stop", srv)
+                if stop_res.returncode != 0:
+                    logging.warning(
+                        f"Failed to stop service {srv}: {stop_res.stderr}"
+                    )
 
             # Reset state after stopping everything
             BaseModelProxy._current_active_model = None
+
+            # Reset failed state for target service
+            run_systemctl_user("reset-failed", target_service)
 
             # Start selected model
             logging.info(f"I am starting the service: {target_service}")
@@ -224,9 +244,11 @@ class BaseModelProxy:
                     f"Failed to start service {target_service}: "
                     f"{start_result.stderr}"
                 )
+                self._rollback(previous_model)
                 return False
 
             # 4. Health check - waiting for API to start (max 120s)
+            success = False
             for _ in range(120):
                 try:
                     # Check health endpoint
@@ -240,7 +262,13 @@ class BaseModelProxy:
                         if models_resp.status_code == 200:
                             logging.info(f"The {target_model} model is ready.")
                             BaseModelProxy._current_active_model = target_model
-                            return True
+                            success = True
+                            break
+                        else:
+                            logging.warning(
+                                f"Health OK but /v1/models returned "
+                                f"{models_resp.status_code}"
+                            )
                 except requests.exceptions.RequestException:
                     pass
                 time.sleep(1)
@@ -249,8 +277,29 @@ class BaseModelProxy:
                         f"Waiting for the model to start {target_model}..."
                     )
 
-            logging.error(f"Model {target_model} did not start on time")
-            return False
+            if not success:
+                logging.error(f"Model {target_model} did not start on time")
+                self._rollback(previous_model)
+                return False
+
+            return True
+
+    def _rollback(self, previous_model: Optional[str]) -> None:
+        """Attempts to restore the previously active model if switch fails.
+
+        Args:
+            previous_model: The model ID that was active before the failed switch.
+        """
+        if not previous_model or previous_model not in MODELS:
+            return
+
+        logging.info(f"Rolling back to previous model: {previous_model}")
+        prev_service = MODELS[previous_model]
+        run_systemctl_user("reset-failed", prev_service)
+        run_systemctl_user("start", prev_service)
+        # We don't block with health check here to avoid infinite loops
+        # or excessive delays, just try to restore the service.
+        BaseModelProxy._current_active_model = previous_model
 
 
 class ChatProxy(BaseModelProxy):
@@ -279,6 +328,11 @@ class ChatProxy(BaseModelProxy):
             if not raw_body:
                 web.ctx.status = "400 Bad Request"
                 return json.dumps({"error": "No data provided"})
+
+            # Payload size limit (10 MB)
+            if len(raw_body) > 10 * 1024 * 1024:
+                web.ctx.status = "413 Payload Too Large"
+                return json.dumps({"error": "Payload exceeds 10MB limit"})
 
             data = json.loads(raw_body)
             # Check if the client requested streaming
@@ -444,6 +498,11 @@ class EmbeddingsProxy(BaseModelProxy):
             if not raw_body:
                 web.ctx.status = "400 Bad Request"
                 return json.dumps({"error": "No data provided"})
+
+            # Payload size limit (10 MB)
+            if len(raw_body) > 10 * 1024 * 1024:
+                web.ctx.status = "413 Payload Too Large"
+                return json.dumps({"error": "Payload exceeds 10MB limit"})
 
             data = json.loads(raw_body)
             target_model = data.get("model")
